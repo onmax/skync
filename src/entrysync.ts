@@ -333,7 +333,9 @@ export function syncEntries(
 function desiredServers(agent: McpAgent, chosen: boolean, defs: Definitions, warnings: string[]) {
   if (!chosen) return dict<McpEntry>();
   const { entries, skipped } = mcpEntries(agent, defs.servers);
-  warnings.push(...skipped.map((problem) => problem.message));
+  warnings.push(
+    ...skipped.map((problem) => `${defs.owner.get(problem.server)}: ${problem.message}`),
+  );
   return entries;
 }
 

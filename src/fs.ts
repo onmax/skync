@@ -512,3 +512,12 @@ export function writeJson(path: string, value: unknown) {
 
 export const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
+
+/**
+ * Where JSON.parse stopped in a file, as " at line L column C", without the snippet of the text
+ * its message can quote, since the file may hold a secret.
+ */
+export function jsonErrorAt(error: unknown): string {
+  const at = /\(line (\d+) column (\d+)\)/.exec(error instanceof Error ? error.message : "");
+  return at ? ` at line ${at[1]} column ${at[2]}` : "";
+}

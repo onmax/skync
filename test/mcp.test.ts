@@ -115,7 +115,8 @@ describe("parseMcpFile", () => {
       typo: `has "enviroment", which fleetrc can't translate`,
       "9lives": "must start with a letter or _ and hold only letters, digits, _ and -",
       badType: '"type" must be "stdio", "http" or "sse", not "ws"',
-      badRef: '"${HOME:-/root}" has `${HOME:-/root}`; write a variable as ${NAME}, with no default',
+      badRef:
+        "its args has a `${` that isn't a variable; write a variable as ${NAME}, with no default",
       badAgent: `"agents" names "windsurf", which fleetrc writes no MCP servers for; use claude-code, codex, cursor, gemini-cli, github-copilot, grok, opencode`,
     });
   });
@@ -278,6 +279,31 @@ describe("mcpEntries", () => {
       command: "run",
       env: { GH_TOKEN: "${GITHUB_TOKEN}" },
     });
+  });
+
+  it("never quotes a value in a message, since it may hold a secret", () => {
+    const out = translate(
+      file({
+        header: {
+          url: "https://x.example/mcp",
+          headers: { Authorization: "Bearer ${A}-sk_live_1" },
+        },
+        env: { command: "run", env: { GH_TOKEN: "${GITHUB_TOKEN}-sk_live_2" } },
+      }),
+    );
+    expect(out.codex!.skipped.map((problem) => problem.message)).toEqual([
+      'codex: server "header" has header "Authorization" mixing text and variables; Codex takes a header only as a whole variable or "Bearer ${VAR}"; skipped',
+      'codex: server "env" has env "GH_TOKEN" holding a variable; Codex passes a variable on only under its own name, as GH_TOKEN = "${GH_TOKEN}"; skipped',
+    ]);
+    const { problems } = parseMcpFile(
+      JSON.stringify({ mcpServers: { bad: { command: "a", env: { X: "sk_live_3${" } } } }),
+      "mcp.json",
+    );
+    expect(problems[0]!.message).not.toContain("sk_live");
+    expect(problems[0]!.message).toContain('env "X" has a `${`');
+    expect(() => parseMcpFile('{"mcpServers": sk_live_4}', "mcp.json")).toThrow(
+      /^mcp\.json is not valid JSON( at line 1 column \d+)?$/,
+    );
   });
 
   it("braces a Gemini reference that a name character follows", () => {

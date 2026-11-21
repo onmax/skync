@@ -8,7 +8,7 @@
 //   - Gemini CLI: matcher groups under `hooks` in ~/.gemini/settings.json, and Cursor: scripts under
 //     `hooks` in ~/.cursor/hooks.json, each marked as fleetrc's (entrysync.ts).
 // No hook is trusted on the user's behalf: Codex asks for each new or changed one in /hooks.
-import { dict, isRecord } from "./fs.ts";
+import { dict, isRecord, jsonErrorAt } from "./fs.ts";
 import { segmentProblem } from "./names.ts";
 
 /** Agents whose hooks fleetrc syncs. */
@@ -422,7 +422,7 @@ export function parseHookFile(
   try {
     json = JSON.parse(text.replace(/^﻿/, ""));
   } catch (error) {
-    throw new HookFileError(`${file} is not valid JSON: ${(error as Error).message}`);
+    throw new HookFileError(`${file} is not valid JSON${jsonErrorAt(error)}`);
   }
   try {
     if (!isRecord(json) || !isRecord(json.hooks))

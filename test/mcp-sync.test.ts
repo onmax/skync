@@ -313,6 +313,16 @@ describe("MCP servers", () => {
     );
   });
 
+  it("names the source of a server an agent can't take", async () => {
+    const { m } = await setup(["codex"], {
+      docs: docs(),
+      mixed: { url: "https://x.example/mcp", headers: { Authorization: "Token ${A}" } },
+    });
+    expect((await sync(m)).warnings).toContainEqual(
+      expect.stringMatching(/^defs: codex: server "mixed" has header "Authorization"/),
+    );
+  });
+
   it("keeps a source's servers as they are while its mcp file does not parse", async () => {
     const { m, defs } = await setup(["claude-code"], { docs: docs() });
     writeFileSync(join(defs, "mcp.json"), "{ not json");

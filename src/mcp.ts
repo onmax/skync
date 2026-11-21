@@ -4,7 +4,7 @@
 //
 // Secrets are never distributed: a value that may hold one is written as `${VAR}`, and each agent
 // gets the reference in its own syntax, so it reads the variable from its environment.
-import { dict, isRecord } from "./fs.ts";
+import { dict, isRecord, jsonErrorAt } from "./fs.ts";
 
 /** Agents fleetrc writes MCP servers for. */
 export const MCP_AGENTS = [
@@ -65,8 +65,11 @@ const SECRET_ENV = /TOKEN|KEY|SECRET|PASSWORD|AUTH/i;
 
 const VAR_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
-/** Splits `text` into literal parts and `${VAR}` references; throws on any other use of `${`. */
-export function parseTemplate(text: string): Template {
+/**
+ * Splits `text` into literal parts and `${VAR}` references; throws on any other use of `${`. The
+ * message names the value as `where` and never quotes it, since it may hold a secret.
+ */
+export function parseTemplate(text: string, where = "a value"): Template {
   const parts: Array<string | { env: string }> = [];
   let rest = text;
   while (rest !== "") {
@@ -80,7 +83,7 @@ export function parseTemplate(text: string): Template {
     const name = end === -1 ? undefined : rest.slice(start + 2, end);
     if (name === undefined || !VAR_NAME.test(name))
       throw new Error(
-        `"${text}" has \`${rest.slice(start, end === -1 ? undefined : end + 1)}\`; write a variable as \${NAME}, with no default`,
+        `${where} has a \`\${\` that isn't a variable; write a variable as \${NAME}, with no default`,
       );
     parts.push({ env: name });
     rest = rest.slice(end + 1);
@@ -109,8 +112,12 @@ function stringMap(value: unknown, field: string): Record<string, string> {
   return value as Record<string, string>;
 }
 
-const templates = (map: Record<string, string>) =>
-  dict(Object.entries(map).map(([key, value]) => [key, parseTemplate(value)] as const));
+const templates = (map: Record<string, string>, field: string) =>
+  dict(
+    Object.entries(map).map(
+      ([key, value]) => [key, parseTemplate(value, `${field} "${key}"`)] as const,
+    ),
+  );
 
 function parseAgents(value: unknown): McpAgent[] | undefined {
   if (value === undefined) return undefined;
@@ -150,7 +157,7 @@ function parseServer(value: unknown): McpServer {
       throw new Error(`"args" must be a list of strings`);
     if (value.cwd !== undefined && typeof value.cwd !== "string")
       throw new Error(`"cwd" must be a string`);
-    const env = templates(stringMap(value.env, "env"));
+    const env = templates(stringMap(value.env, "env"), "env");
     for (const [key, item] of Object.entries(env))
       if (SECRET_ENV.test(key) && !hasReference(item))
         throw new Error(
@@ -158,10 +165,12 @@ function parseServer(value: unknown): McpServer {
         );
     return {
       transport: "stdio",
-      command: parseTemplate(value.command),
-      args: ((value.args as string[] | undefined) ?? []).map(parseTemplate),
+      command: parseTemplate(value.command, "its command"),
+      args: ((value.args as string[] | undefined) ?? []).map((arg) =>
+        parseTemplate(arg, "its args"),
+      ),
       env,
-      ...(value.cwd === undefined ? {} : { cwd: parseTemplate(value.cwd) }),
+      ...(value.cwd === undefined ? {} : { cwd: parseTemplate(value.cwd, "its cwd") }),
       ...(agents ? { agents } : {}),
     };
   }
@@ -173,7 +182,7 @@ function parseServer(value: unknown): McpServer {
     );
   if (typeof value.url !== "string" || value.url.trim() === "")
     throw new Error(`"url" must be a non-empty string`);
-  const headers = templates(stringMap(value.headers, "headers"));
+  const headers = templates(stringMap(value.headers, "headers"), "header");
   for (const [key, item] of Object.entries(headers))
     if (!hasReference(item))
       throw new Error(
@@ -181,7 +190,7 @@ function parseServer(value: unknown): McpServer {
       );
   return {
     transport: type === "sse" ? "sse" : "http",
-    url: parseTemplate(value.url),
+    url: parseTemplate(value.url, "its url"),
     headers,
     ...(agents ? { agents } : {}),
   };
@@ -196,7 +205,7 @@ export function parseMcpFile(text: string, file = "the MCP file"): McpDefinition
   try {
     json = JSON.parse(text.replace(/^﻿/, ""));
   } catch (error) {
-    throw new McpFileError(`${file} is not valid JSON: ${(error as Error).message}`);
+    throw new McpFileError(`${file} is not valid JSON${jsonErrorAt(error)}`);
   }
   if (!isRecord(json) || !isRecord(json.mcpServers))
     throw new McpFileError(`${file} must be an object with an "mcpServers" object`);
@@ -421,7 +430,7 @@ function codex(server: McpServer): McpEntry {
       else if (whole) envHeaders[header] = whole;
       else
         throw new Skip(
-          `has header "${header}" = "${templateText(value)}"; Codex takes a header only as a whole variable or "Bearer \${VAR}"`,
+          `has header "${header}" mixing text and variables; Codex takes a header only as a whole variable or "Bearer \${VAR}"`,
         );
     }
     if (Object.keys(envHeaders).length > 0) entry.env_http_headers = envHeaders;
@@ -435,7 +444,7 @@ function codex(server: McpServer): McpEntry {
     else if (!hasReference(value)) env[key] = templateText(value);
     else
       throw new Skip(
-        `has env "${key}" = "${templateText(value)}"; Codex passes a variable on only under its own name, as ${key} = "\${${key}}"`,
+        `has env "${key}" holding a variable; Codex passes a variable on only under its own name, as ${key} = "\${${key}}"`,
       );
   }
   return {
