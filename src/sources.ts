@@ -2497,12 +2497,17 @@ function mergeItems(out: SourceResult, sub: SourceResult, kind: ItemKind, names:
     out.status = "review";
 }
 
-function approvedFileTargets(
+/**
+ * Where a review-mode source's items were approved to go: the agents recorded at the last sync
+ * that fetched it, or before one recorded them, a file's links. A definition is never linked, so
+ * without a record this is undefined and the store's copies count as approved.
+ */
+function approvedTargets(
   source: VendoredSource,
-  kind: FileKind,
+  kind: ItemKind,
   selected: Record<string, string[]> | undefined,
   ctx: SourceContext,
-): Map<string, FileTarget[]> {
+): Map<string, FileTarget[]> | undefined {
   const approved = new Map<string, FileTarget[]>();
   if (selected) {
     for (const [name, agents] of Object.entries(selected)) {
@@ -2513,6 +2518,7 @@ function approvedFileTargets(
     }
     return approved;
   }
+  if (!isFileKind(kind)) return undefined;
   for (const [destination, link] of Object.entries(ctx.fileLinks ?? {})) {
     if (link.source !== source.id || link.kind !== kind) continue;
     if (!link.item.startsWith(`${kind}/`)) continue;
@@ -2559,10 +2565,9 @@ function vendoredFiles(
     lookForEdits(source, view, kindCtx, sub);
     const selected = () =>
       findFileItems(source, kind, pathsLister(Object.keys(view.skills).map(itemPath)), []);
-    // Definitions are never linked, so only a file kind reads what review mode approved from links.
     const approved =
-      source.update === "review" && isFileKind(kind)
-        ? approvedFileTargets(source, kind, records.selected, ctx)
+      source.update === "review"
+        ? (approvedTargets(source, kind, records.selected, ctx) ?? selected())
         : undefined;
     const found = root
       ? findFileItems(source, kind, treeLister(root), sub.warnings)

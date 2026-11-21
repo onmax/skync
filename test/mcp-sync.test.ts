@@ -456,6 +456,29 @@ describe("MCP servers", () => {
     expect(read(file)).toContain("docs-mcp@2");
   });
 
+  it("a review-mode source keeps a server whose mcp file went upstream until `update`", async () => {
+    const m = machine();
+    const vendor = remote(m, "vendor", {
+      ...skills("skills/", "tool"),
+      "mcp.json": mcpFile({ docs: docs() }),
+    });
+    const manifest = m.manifest({
+      agents: ["claude-code"],
+      sources: [{ id: "vendor", git: vendor.url, mcp: "mcp.json", update: "review" }],
+    });
+    expect((await m.run("init", manifest, "--no-hooks")).code).toBe(0);
+    const file = m.at(".claude", ".claude.json");
+    vendor.commit({ "mcp.json": null });
+    for (const args of [[], ["--offline"]]) {
+      const held = await m.json<Report & { pending: { skill: string }[] }>("sync", ...args);
+      expect(held.entries.removed).toEqual([]);
+      expect(held.pending.map((entry) => entry.skill)).toEqual(["mcp/mcp.json"]);
+      expect(read(file)).toContain("docs-mcp@1");
+    }
+    expect((await m.run("update", "vendor")).code).toBe(0);
+    expect(json(read(file)).mcpServers).toEqual({});
+  });
+
   it("a dry run of a new vendored mcp file reports what the sync would write", async () => {
     const m = machine();
     const vendor = remote(m, "vendor", {

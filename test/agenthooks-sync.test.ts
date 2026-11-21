@@ -11,6 +11,7 @@ import {
   machine,
   type Machine,
   read,
+  remote,
   skills,
   snapshot,
   writeFiles,
@@ -406,5 +407,29 @@ describe("hooks", () => {
     expect(report.warnings.join("\n")).toContain("stay as last synced");
     expect(report.entries.removed).toEqual([]);
     expect(read(m.at(".grok", "hooks", "fleetrc-defs.json"))).toContain("echo one");
+  });
+
+  it("a review-mode source keeps its hooks when its file goes upstream, until `update`", async () => {
+    const m = machine();
+    const vendor = remote(m, "vendor", {
+      ...skills("skills/", "tool"),
+      "hooks.json": hookFile("echo one"),
+    });
+    const manifest = m.manifest({
+      agents: ["codex"],
+      sources: [
+        { id: "vendor", git: vendor.url, agentHooks: { codex: "hooks.json" }, update: "review" },
+      ],
+    });
+    expect((await m.run("init", manifest, "--no-hooks")).code).toBe(0);
+    const file = m.at(".codex/hooks.json");
+    const installed = read(file);
+    vendor.commit({ "hooks.json": null });
+    for (const args of [[], ["--offline"]]) {
+      expect((await sync(m, ...args)).entries.removed).toEqual([]);
+      expect(read(file)).toBe(installed);
+    }
+    expect((await m.run("update", "vendor")).code).toBe(0);
+    expect(JSON.parse(read(file)).hooks).toEqual({});
   });
 });
