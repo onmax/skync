@@ -1,7 +1,9 @@
 // Files a source gives agents besides skills: an instruction file, subagents and commands. Each
 // file is an item, `<kind>/<path in the source>`. A vendored source keeps each item in its store
 // as a folder of one file (sources.ts), so edits, review, diff and merge work as for skills, and
-// sync links each item to the path where every agent it goes to reads that kind (kinds.ts).
+// sync links each item to the path where every agent it goes to reads that kind (kinds.ts). The
+// `mcp` and `agentHooks` definition files are items too, kept the same way, but never linked:
+// entrysync.ts merges what they define into each agent's config.
 import {
   copyFileSync,
   existsSync,
@@ -17,7 +19,7 @@ import {
 import { dirname, join, posix, resolve } from "node:path";
 import { dict, inside, isErrno, lstat, sha256 } from "./fs.ts";
 import { globBase, globFilter, GlobWorkLimitError } from "./glob.ts";
-import { FILE_KINDS, type FileKind, kindPath } from "./kinds.ts";
+import { type FileKind, isFileKind, ITEM_KINDS, type ItemKind, kindPath } from "./kinds.ts";
 import { errorText, linkTarget, samePath } from "./linker.ts";
 import type { Source } from "./manifest.ts";
 import { segmentProblem } from "./names.ts";
@@ -31,7 +33,7 @@ export interface FileTarget {
 }
 
 export interface FileEntry {
-  kind: FileKind;
+  kind: ItemKind;
   /** The file's `/`-separated path in the source. */
   path: string;
   /** The file agents link to: in the store, or in the folder linked in place. */
@@ -39,10 +41,15 @@ export interface FileEntry {
   agents: FileTarget[];
   /** Changed upstream in this sync. */
   updated?: boolean;
+  /**
+   * A definition file's text as this sync uses it, read when the source synced: a dry run never
+   * writes the store, so `file` may not hold it yet.
+   */
+  text?: string;
 }
 
 /** The id commands and reports use for an item. Skill names have no `/`, so the two never meet. */
-export const itemId = (kind: FileKind, path: string) => `${kind}/${path}`;
+export const itemId = (kind: ItemKind, path: string) => `${kind}/${path}`;
 
 /** The item's folder name in the store: its path as one segment. */
 export const itemName = (path: string) => path.replaceAll("%", "%25").replaceAll("/", "%2F");
@@ -51,11 +58,11 @@ export const itemName = (path: string) => path.replaceAll("%", "%25").replaceAll
 export const itemPath = (name: string) => name.replaceAll("%2F", "/").replaceAll("%25", "%");
 
 /** The kind and path of an item id, or undefined for a skill name. */
-export function parseItemId(id: string): { kind: FileKind; path: string } | undefined {
+export function parseItemId(id: string): { kind: ItemKind; path: string } | undefined {
   const at = id.indexOf("/");
   if (at < 0) return undefined;
-  const kind = id.slice(0, at) as FileKind;
-  return FILE_KINDS.includes(kind) && at < id.length - 1
+  const kind = id.slice(0, at) as ItemKind;
+  return ITEM_KINDS.includes(kind) && at < id.length - 1
     ? { kind, path: id.slice(at + 1) }
     : undefined;
 }
@@ -132,11 +139,12 @@ export const pathsLister =
 
 /**
  * The files of `kind` a source gives, by path, with the agents each goes to. A glob for
- * instructions must find one file, since an agent reads one instruction file.
+ * instructions must find one file, since an agent reads one instruction file, and so must one for
+ * a definition file (`mcp`, `agentHooks`).
  */
 export function findFileItems(
   source: Source,
-  kind: FileKind,
+  kind: ItemKind,
   list: FileLister,
   warnings: string[],
 ): Map<string, FileTarget[]> {
@@ -165,13 +173,18 @@ export function findFileItems(
       return problem === undefined;
     });
     if (found.length === 0) {
-      warnings.push(`${source.id}: ${kind} "${glob}" for ${agent} matches no file`);
+      warnings.push(
+        `${source.id}: ${kind} "${glob}"${agent === "*" ? "" : ` for ${agent}`} matches no file`,
+      );
       continue;
     }
-    if (kind === "instructions") {
+    if (kind === "instructions" || !isFileKind(kind)) {
       if (found.length > 1) {
+        const whom = agent === "*" ? "" : ` for ${agent}`;
         warnings.push(
-          `${source.id}: instructions "${glob}" for ${agent} match ${found.length} files (${found.join(", ")}); an agent reads one instruction file, so none is linked`,
+          kind === "instructions"
+            ? `${source.id}: instructions "${glob}"${whom} match ${found.length} files (${found.join(", ")}); an agent reads one instruction file, so none is linked`
+            : `${source.id}: ${kind} "${glob}"${whom} matches ${found.length} files (${found.join(", ")}); it must name one file, so none is used`,
         );
         continue;
       }
@@ -289,7 +302,9 @@ export function linkFiles(
       lastLinks(result.id);
       continue;
     }
-    for (const entry of result.files)
+    for (const entry of result.files) {
+      // Definition files are merged into agents' configs, not linked (entrysync.ts).
+      if (!isFileKind(entry.kind)) continue;
       for (const target of entry.agents) {
         if (!chosen.has(target.agent)) continue;
         const path = targetPath(entry.kind, target);
@@ -304,6 +319,7 @@ export function linkFiles(
             updated: entry.updated,
           });
       }
+    }
   }
   for (const source of keep) if (!results.some((result) => result.id === source)) lastLinks(source);
 

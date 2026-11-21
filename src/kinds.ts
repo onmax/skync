@@ -1,7 +1,8 @@
-// Where each agent reads the files fleetrc links besides skills: its user-level instruction file,
-// its subagents and its commands. The MCP and hook cells are data for the config writers; sync
-// does not use them yet. Each cell is the agent's documented user-level location; a cell the
-// vendor's docs do not confirm is left out.
+// Where each agent reads the files fleetrc links besides skills (its user-level instruction file,
+// its subagents and its commands), and where it keeps the MCP servers and hooks fleetrc merges in
+// (entrysync.ts). Each cell is the agent's documented user-level location; a cell the vendor's
+// docs do not confirm is left out.
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { claudeHome, xdgDir } from "./paths.ts";
@@ -10,10 +11,25 @@ import { claudeHome, xdgDir } from "./paths.ts";
 export const FILE_KINDS = ["instructions", "subagents", "commands"] as const;
 export type FileKind = (typeof FILE_KINDS)[number];
 
+/**
+ * Kinds of definition files a source can provide, vendored like files but never linked: their
+ * entries are merged into each agent's own config (entrysync.ts). Only the root manifest's
+ * sources may set them, since an MCP server or a hook runs a command.
+ */
+export const DEFINITION_KINDS = ["mcp", "agentHooks"] as const;
+export type DefinitionKind = (typeof DEFINITION_KINDS)[number];
+
+/** Every kind of item a source keeps besides skills. */
+export const ITEM_KINDS = [...FILE_KINDS, ...DEFINITION_KINDS] as const;
+export type ItemKind = (typeof ITEM_KINDS)[number];
+
+export const isFileKind = (kind: string): kind is FileKind => FILE_KINDS.includes(kind as FileKind);
+
 /** Where an agent keeps its MCP servers: a file and the key that holds them. */
 export interface McpCell {
   file: () => string;
-  format: "json" | "toml";
+  /** `json` also covers a `.jsonc` file the cell picks, which is edited as JSONC. */
+  format: "json" | "jsonc" | "toml";
   /** The key path of the servers object, such as `["mcpServers"]`. */
   key: readonly string[];
 }
@@ -102,11 +118,18 @@ export const AGENT_KINDS: Readonly<Record<string, AgentKinds>> = {
     // https://opencode.ai/docs/commands/: `~/.config/opencode/commands/`; nested paths become
     // `/team/review`.
     commands: "commands",
-    // https://opencode.ai/docs/config/ and https://opencode.ai/docs/mcp-servers/: servers go under
-    // `mcp.servers` of `~/.config/opencode/opencode.json(c)`.
+    // https://opencode.ai/docs/mcp-servers/ ("V2 does not place server names directly under
+    // `mcp`") and the config schema https://opencode.ai/config.json, which marks a server under
+    // `mcp.<name>` deprecated: servers go under `mcp.servers` of
+    // `~/.config/opencode/opencode.json`, or `opencode.jsonc` when that is the file there.
     mcp: {
-      file: () => join(configHome(), "opencode", "opencode.json"),
-      format: "json",
+      file: () => {
+        const dir = join(configHome(), "opencode");
+        return existsSync(join(dir, "opencode.jsonc"))
+          ? join(dir, "opencode.jsonc")
+          : join(dir, "opencode.json");
+      },
+      format: "jsonc",
       key: ["mcp", "servers"],
     },
   },

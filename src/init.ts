@@ -23,6 +23,7 @@ import {
 import { nameKey } from "./names.ts";
 import { paths, tildify } from "./paths.ts";
 import type { Report } from "./report.ts";
+import { CLAUDE_PLUGIN_NAME } from "./hookdefs.ts";
 import { GitError } from "./exec.ts";
 import { cloneAt } from "./sources.ts";
 import { sync } from "./sync.ts";
@@ -65,7 +66,8 @@ export interface InitPlan {
 /** Names shown in a skills folder (following a whole-folder link), without dotfiles. */
 function entries(dir: string): string[] {
   try {
-    return readdirSync(dir).filter((name) => !name.startsWith("."));
+    // ~/.claude/skills/fleetrc is fleetrc's own plugin folder (entrysync.ts), not a skill.
+    return readdirSync(dir).filter((name) => !name.startsWith(".") && name !== CLAUDE_PLUGIN_NAME);
   } catch {
     return [];
   }

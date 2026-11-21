@@ -364,11 +364,11 @@ function githubCopilot(server: McpServer): McpEntry {
 }
 
 /**
- * OpenCode, `opencode.json` `mcp`: `type: "local"` with `command` as one array and `environment`,
- * or `type: "remote"` with `url` (streamable HTTP only) and `headers`. `{env:NAME}` is replaced
- * anywhere in the config. The entry leaves out `enabled` (v1) and `disabled` (v2), so it reads the
- * same under `mcp.<name>` and `mcp.servers.<name>`.
- * https://opencode.ai/docs/mcp-servers and https://opencode.ai/docs/config
+ * OpenCode, `opencode.json(c)` `mcp.servers` (a server directly under `mcp` is deprecated):
+ * `type: "local"` with `command` as one array and `environment`, or `type: "remote"` with `url`
+ * (streamable HTTP only) and `headers`. `{env:NAME}` is replaced anywhere in the config.
+ * https://opencode.ai/docs/mcp-servers, https://opencode.ai/docs/config and
+ * https://opencode.ai/config.json
  */
 function opencode(server: McpServer): McpEntry {
   const ref = (name: string) => `{env:${name}}`;

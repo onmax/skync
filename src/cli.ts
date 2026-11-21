@@ -67,6 +67,7 @@ import { findName, nameKey } from "./names.ts";
 import { migrationNeeded } from "./legacy.ts";
 import { paths, stateDir, tildify } from "./paths.ts";
 import { formatReport, type Report } from "./report.ts";
+import { diffEntry, isMcpEntryId } from "./entrysync.ts";
 import {
   commandOnPath,
   findOnPath,
@@ -217,10 +218,10 @@ const COMMANDS: Record<string, Command> = {
     options: EDIT_OPTIONS,
   },
   diff: {
-    usage: "diff [skill]",
-    summary: "Show updates waiting for review, or one skill's local edits",
+    usage: "diff [skill | mcp/<agent>/<server>]",
+    summary: "Show updates waiting for review, one skill's local edits, or one MCP server's",
     details:
-      "Without a skill, shows every update a source is holding: the skills a review-mode source holds, edited copies whose upstream changed, and the commits a review-mode working clone has not merged.",
+      "Without a skill, shows every update a source is holding: the skills a review-mode source holds, edited copies whose upstream changed, and the commits a review-mode working clone has not merged. With mcp/<agent>/<server>, shows that server in the agent's config against what the manifest gives it, such as a held entry edited by hand.",
     options: ["manifest"],
   },
   merge: {
@@ -619,6 +620,7 @@ async function status() {
       lastRun: report,
       lastChange: state.lastChange,
       files: Object.keys(state.links ?? {}).length,
+      entries: Object.keys(state.entries ?? {}).length,
       forks: state.forks ?? {},
       staleSessions: stale,
       trigger: {
@@ -669,6 +671,8 @@ function list() {
   else {
     for (const skill of listed.skills) say(`${skill.name}  ${skill.source}  ${tildify(skill.dir)}`);
     for (const file of listed.files) say(`${file.item}  ${file.source}  ${tildify(file.path)}`);
+    for (const entry of listed.entries)
+      say(`${entry.id}  ${entry.source ?? entry.sources?.join(",") ?? ""}  ${tildify(entry.file)}`);
   }
   return 0;
 }
@@ -1476,7 +1480,11 @@ async function main(): Promise<number> {
     case "diff": {
       if (rest.length > 1) usage("diff takes at most one skill");
       const spec = manifestSpec(values.manifest);
-      const out = rest[0] ? await diffSkill(spec, rest[0]) : await diffPending(spec);
+      const out = !rest[0]
+        ? await diffPending(spec)
+        : isMcpEntryId(rest[0])
+          ? await diffEntry(spec, rest[0])
+          : await diffSkill(spec, rest[0]);
       process.stdout.write(
         out || (rest[0] ? "no differences\n" : "no updates are waiting for review\n"),
       );

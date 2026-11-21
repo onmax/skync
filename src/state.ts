@@ -1,7 +1,8 @@
 import { chmodSync, copyFileSync, mkdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { dict, type Hashes, isRecord, JsonFileError, readJson, writeJson } from "./fs.ts";
-import { FILE_KINDS, type FileKind } from "./kinds.ts";
+import type { EntryRecord } from "./entries.ts";
+import { FILE_KINDS, type FileKind, ITEM_KINDS, type ItemKind } from "./kinds.ts";
 import { isVendoredKind, type Source } from "./manifest.ts";
 import { paths, tildify } from "./paths.ts";
 import { skillRecord, type SkillRecord } from "./skill-record.ts";
@@ -32,8 +33,11 @@ export interface SourceState {
   fetchedAt?: string;
   skills: Record<string, InstalledCopy>;
   pending: Record<string, PendingUpdate>;
-  /** Files of each kind (instructions, subagents, commands), by item name; see files.ts. */
-  files?: Partial<Record<FileKind, FileItems>>;
+  /**
+   * Files of each kind (instructions, subagents, commands, and the `mcp` and `agentHooks`
+   * definitions), by item name; see files.ts.
+   */
+  files?: Partial<Record<ItemKind, FileItems>>;
 }
 
 /** A source's files of one kind, kept as its skills are: install records and held updates. */
@@ -89,6 +93,19 @@ export interface State {
   skillChanges?: Record<string, SkillChanges>;
   /** Files linked into agent folders, by their path there. */
   links?: Record<string, FileLink>;
+  /**
+   * Entries fleetrc merged into agents' config files (MCP servers, hooks), by id, such as
+   * `mcp/codex/github`; see entrysync.ts.
+   */
+  entries?: Record<string, OwnedEntry>;
+}
+
+/** An entry fleetrc wrote, and the source it came from. */
+export interface OwnedEntry extends EntryRecord {
+  /** The source that defined it; undefined for a file built from several (Claude's hook plugin). */
+  source?: string;
+  /** For a file built from several definitions: the sources whose definitions it holds. */
+  sources?: string[];
 }
 
 interface SkillChanges {
@@ -156,7 +173,19 @@ export function loadState(warnings?: string[]): State {
       ? { skillChanges: records(raw.skillChanges, skillChanges) }
       : {}),
     ...(isRecord(raw.links) ? { links: records(raw.links, fileLink) } : {}),
+    ...(isRecord(raw.entries) ? { entries: records(raw.entries, ownedEntry) } : {}),
   };
+}
+
+function ownedEntry(record: unknown): OwnedEntry | undefined {
+  if (!isRecord(record)) return undefined;
+  const { file, key, hash } = record;
+  if (typeof file !== "string" || typeof key !== "string" || typeof hash !== "string")
+    return undefined;
+  const sources = Array.isArray(record.sources)
+    ? record.sources.filter((source): source is string => typeof source === "string")
+    : undefined;
+  return { file, key, hash, ...strings(record, "source"), ...(sources ? { sources } : {}) };
 }
 
 function fileLink(record: unknown): FileLink | undefined {
@@ -242,9 +271,9 @@ function sourceRecord(record: unknown): SourceState | undefined {
       ? {
           files: dict(
             Object.entries(records(record.files, fileItems)).filter(([kind]) =>
-              FILE_KINDS.includes(kind as FileKind),
+              ITEM_KINDS.includes(kind as ItemKind),
             ),
-          ) as Partial<Record<FileKind, FileItems>>,
+          ) as Partial<Record<ItemKind, FileItems>>,
         }
       : {}),
   };
