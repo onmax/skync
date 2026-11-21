@@ -212,6 +212,15 @@ export function setTomlTable(
     }
   }
 
+  // Blocks with only blank lines between them, such as [x] and then [x.env] as fleetrc writes
+  // them, are one span: removed whole, they leave the lines around them as they were.
+  const spans: { start: number; end: number }[] = [];
+  for (const block of blocks) {
+    const last = spans.at(-1);
+    if (last && /^\s*$/.test(text.slice(last.end, block.start))) last.end = block.end;
+    else spans.push({ ...block });
+  }
+
   const eol = text.includes("\r\n") ? "\r\n" : "\n";
   const body =
     value === undefined
@@ -221,10 +230,10 @@ export function setTomlTable(
           .split("\n")
           .join(eol);
   let out: string;
-  if (blocks.length > 0) {
+  if (spans.length > 0) {
     // The new block goes where the first was; the others go.
     out = text;
-    for (const [i, block] of [...blocks.entries()].reverse()) {
+    for (const [i, block] of [...spans.entries()].reverse()) {
       let { start, end } = block;
       // A removed block takes one blank line with it when one is also before it, or, at the end of
       // the file, the blank line before it.
