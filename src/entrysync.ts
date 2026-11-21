@@ -29,7 +29,7 @@ import { decideEntry, type EntryDecision, type EntryRecord, sameValue } from "./
 import { UserError } from "./errors.ts";
 import { git, GitError } from "./exec.ts";
 import { type FileEntry, findFileItems, itemName, itemPath, treeLister } from "./files.ts";
-import { dict, isRecord, lstat } from "./fs.ts";
+import { dict, isRecord, listFiles, lstat } from "./fs.ts";
 import {
   CLAUDE_PLUGIN_NAME,
   claudePluginFiles,
@@ -524,6 +524,8 @@ function removeEmptyDirs(dirs: readonly string[]) {
     }
 }
 
+const PLUGIN_MANIFEST = ".claude-plugin/plugin.json";
+
 /**
  * Claude Code's hooks: the plugin folder `~/.claude/skills/fleetrc`, which Claude Code loads as
  * `fleetrc@skills-dir`. Never settings.json, whose hooks Grok also runs. The folder goes when no
@@ -554,6 +556,15 @@ function claudePlugin(chosen: boolean, defs: Definitions, ledger: Ledger, dryRun
     );
     return;
   }
+  // A folder of that name holding a file fleetrc never wrote, such as a skill's SKILL.md, is
+  // someone else's.
+  const strangers = stat ? listFiles(dir).filter((rel) => !rels.includes(rel)) : [];
+  if (strangers.length > 0) {
+    ledger.report.warnings.push(
+      `${tildify(dir)} holds ${strangers.join(", ")}, which fleetrc did not write, so Claude Code's hooks were not synced; move it away`,
+    );
+    return;
+  }
   const planned = rels.map((rel) => {
     const path = join(dir, ...rel.split("/"));
     const decision = decideEntry({
@@ -565,6 +576,11 @@ function claudePlugin(chosen: boolean, defs: Definitions, ledger: Ledger, dryRun
     });
     return { rel, path, decision };
   });
+  // While a hooks file edited by hand stays, so does the manifest that makes Claude Code load it.
+  if (planned.some(({ decision }) => decision.action === "hold"))
+    for (const plan of planned)
+      if (plan.rel === PLUGIN_MANIFEST && plan.decision.action === "prune")
+        plan.decision = { action: "keep", record: ledger.record(prefix + plan.rel, plan.path)! };
   // A folder of that name that fleetrc did not make is someone else's plugin or skill.
   if (planned.some(({ decision }) => decision.action === "foreign")) {
     for (const { rel, path, decision } of planned)
@@ -575,6 +591,10 @@ function claudePlugin(chosen: boolean, defs: Definitions, ledger: Ledger, dryRun
     return;
   }
   for (const { rel, path, decision } of planned) {
+    const owners =
+      decision.action === "keep" && !Object.hasOwn(files, rel)
+        ? ledger.records[prefix + rel]!.sources
+        : sources;
     if (!dryRun)
       try {
         if (writes(decision)) {
@@ -590,7 +610,7 @@ function claudePlugin(chosen: boolean, defs: Definitions, ledger: Ledger, dryRun
         ledger.report.errors.push(`${tildify(path)}: ${message(error)}`);
         continue;
       }
-    ledger.settle(prefix + rel, path, decision, { sources });
+    ledger.settle(prefix + rel, path, decision, { sources: owners });
   }
   if (!dryRun && Object.keys(files).length === 0)
     removeEmptyDirs([join(dir, "hooks"), join(dir, ".claude-plugin"), dir]);

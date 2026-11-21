@@ -3,7 +3,7 @@
 // whose slots never move, Grok's as owned files, Gemini CLI's as marked groups in settings.json and
 // Cursor's as marked scripts in hooks.json. Added, updated, removed when dropped, held when edited
 // by hand, left alone when foreign, and never written in a dry run.
-import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vite-plus/test";
 import {
@@ -236,6 +236,34 @@ describe("hooks", () => {
       "defs: the skill fleetrc is not linked: fleetrc keeps that name for the plugin that carries Claude Code's hooks",
     );
     expect(existsSync(m.at(".claude", "skills", "fleetrc"))).toBe(false);
+  });
+
+  it("Claude Code: keeps the plugin manifest while a hooks file edited by hand stays", async () => {
+    const { m, write } = await setup(named("claude-code"));
+    const hooks = m.at(".claude", "skills", "fleetrc", "hooks", "hooks.json");
+    const manifest = m.at(".claude", "skills", "fleetrc", ".claude-plugin", "plugin.json");
+    const plugin = read(manifest);
+    writeFileSync(hooks, read(hooks).replace("echo one", "echo mine"));
+    write({});
+    const dropped = await sync(m);
+    expect(dropped.entries.removed).toEqual([]);
+    expect(read(manifest)).toBe(plugin);
+    // Once the edited file goes, so does the manifest.
+    rmSync(hooks);
+    const gone = await sync(m);
+    expect(gone.entries.removed).toEqual(["agentHooks/claude-code/.claude-plugin/plugin.json"]);
+    expect(existsSync(m.at(".claude", "skills", "fleetrc"))).toBe(false);
+  });
+
+  it("Claude Code: leaves a folder named fleetrc that it did not make alone", async () => {
+    const skill = "---\nname: fleetrc\ndescription: mine\n---\n";
+    const { m, init } = await setup(named("claude-code"), {
+      before: (m) => writeFiles(m.home, { ".claude/skills/fleetrc/SKILL.md": skill }),
+    });
+    expect(init.entries.added).toEqual([]);
+    expect(init.warnings.join("\n")).toContain("holds SKILL.md, which fleetrc did not write");
+    expect(readdirSync(m.at(".claude", "skills", "fleetrc"))).toEqual(["SKILL.md"]);
+    expect(read(m.at(".claude", "skills", "fleetrc", "SKILL.md"))).toBe(skill);
   });
 
   it("Codex: slots never move, and each change asks for approval in /hooks", async () => {
