@@ -7,9 +7,12 @@
 //   agentHooks/claude-code/<file>               a file of the plugin ~/.claude/skills/fleetrc
 //   agentHooks/codex/<source>/<event>/<n>       the nth group of a definition in Codex's hooks.json
 //   agentHooks/grok/fleetrc-<source>.json       a hooks file of Grok's
+//   agentHooks/gemini-cli/<source>/<event>/<n>  the nth group of a definition in Gemini's settings.json
+//   agentHooks/cursor/<source>/<event>/<n>      the nth script of a definition in Cursor's hooks.json
 //
-// Each config file is read once and written at most once per sync, under its lock. A dry run
-// writes nothing, not even a lock folder.
+// Each config file is read once and written at most once per step, under its lock: Gemini CLI's
+// settings.json, which holds both its MCP servers and its hooks, is edited once for each. A dry
+// run writes nothing, not even a lock folder.
 import { mkdtempSync, realpathSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
@@ -30,7 +33,7 @@ import { dict, isRecord, lstat } from "./fs.ts";
 import {
   CLAUDE_PLUGIN_NAME,
   claudePluginFiles,
-  CODEX_MARK,
+  HOOK_MARK,
   codexHooksWith,
   grokHookFiles,
   HOOK_DEF_AGENTS,
@@ -111,13 +114,13 @@ function collect(sources: readonly EntrySource[], keep: ReadonlySet<string>): De
     servers: dict(),
     owner: new Map(),
     broken: new Set(),
-    hooks: { "claude-code": dict(), codex: dict(), grok: dict() },
+    hooks: Object.fromEntries(
+      HOOK_DEF_AGENTS.map((agent) => [agent, dict()]),
+    ) as Definitions["hooks"],
     frozenMcp: new Set(keep),
-    frozenHooks: {
-      "claude-code": new Set(keep),
-      codex: new Set(keep),
-      grok: new Set(keep),
-    },
+    frozenHooks: Object.fromEntries(
+      HOOK_DEF_AGENTS.map((agent) => [agent, new Set(keep)]),
+    ) as Definitions["frozenHooks"],
     shadowed: [],
     warnings: [],
   };
@@ -306,6 +309,8 @@ export function syncEntries(
     ["claude-code", () => claudePlugin(chosen.has("claude-code"), defs, ledger, dryRun)],
     ["codex", () => codexHooks(chosen.has("codex"), defs, ledger, dryRun)],
     ["grok", () => grokHooks(chosen.has("grok"), defs, ledger, dryRun)],
+    ["gemini-cli", () => markedHooks("gemini-cli", chosen.has("gemini-cli"), defs, ledger, dryRun)],
+    ["cursor", () => markedHooks("cursor", chosen.has("cursor"), defs, ledger, dryRun)],
   ];
   for (const [agent, step] of steps)
     try {
@@ -549,7 +554,7 @@ function ownedGroups(root: Record<string, unknown> | undefined) {
   for (const [event, groups] of Object.entries(hooks)) {
     if (!Array.isArray(groups)) continue;
     for (const group of groups) {
-      const owner = isRecord(group) ? group[CODEX_MARK] : undefined;
+      const owner = isRecord(group) ? group[HOOK_MARK] : undefined;
       if (typeof owner !== "string" || owner === "") continue;
       const key = `${owner}/${event}`;
       owned.set(key, [...(owned.get(key) ?? []), group]);
@@ -597,7 +602,7 @@ function codexHooks(chosen: boolean, defs: Definitions, ledger: Ledger, dryRun: 
           continue;
         }
         const want = (definitions[name]?.[event] ?? []).map((group) => ({
-          [CODEX_MARK]: name,
+          [HOOK_MARK]: name,
           ...group,
         }));
         const count = Math.max(want.length, have.length, recorded.get(key) ?? 0);
@@ -674,6 +679,133 @@ function codexHooks(chosen: boolean, defs: Definitions, ledger: Ledger, dryRun: 
       ledger.settle(id, file, decision, { source });
       if (writes(decision)) ledger.report.review.push(id);
     }
+}
+
+/** What a sync does to one event's list: items replaced by index, removed, and added at the end. */
+interface ListPlan {
+  replace: Map<number, unknown>;
+  remove: number[];
+  add: unknown[];
+}
+
+/**
+ * Hooks fleetrc merges into a JSON file the agent shares with the user: Gemini CLI's matcher groups
+ * in ~/.gemini/settings.json and Cursor's scripts in ~/.cursor/hooks.json. Each item fleetrc writes
+ * under `hooks.<event>` carries `"fleetrc": "<source>"` and is added, changed or removed alone;
+ * every other item, and every other byte of the file, stays as it was.
+ */
+function markedHooks(
+  agent: "gemini-cli" | "cursor",
+  chosen: boolean,
+  defs: Definitions,
+  ledger: Ledger,
+  dryRun: boolean,
+) {
+  const cell = AGENT_KINDS[agent]?.agentHooks;
+  if (cell?.style !== "entries") return;
+  const file = cell.file();
+  const prefix = `agentHooks/${agent}/`;
+  const definitions = hookDefinitions(agent, chosen, defs);
+  const frozen = defs.frozenHooks[agent];
+  if (Object.keys(definitions).length === 0 && ledger.ids(prefix).length === 0) return;
+  let done: { id: string; decision: EntryDecision; source: string }[] = [];
+  let refused: string | undefined;
+  const result = editConfigFile(
+    file,
+    (root) => {
+      done = [];
+      const hooks = root?.hooks;
+      if (hooks !== undefined && !isRecord(hooks)) {
+        refused = `${tildify(file)} has "hooks" that isn't an object, so ${agent}'s hooks were not synced`;
+        return [];
+      }
+      const lists = dict<unknown[]>();
+      const owned = new Map<string, number[]>();
+      for (const [event, items] of Object.entries(hooks ?? {})) {
+        // Gemini CLI keeps settings such as `enabled` beside the events.
+        if (!Array.isArray(items)) continue;
+        lists[event] = items;
+        items.forEach((item, index) => {
+          const owner = isRecord(item) ? item[HOOK_MARK] : undefined;
+          if (typeof owner !== "string" || owner === "") return;
+          const key = `${owner}/${event}`;
+          owned.set(key, [...(owned.get(key) ?? []), index]);
+        });
+      }
+      const recorded = new Map<string, number>();
+      for (const id of ledger.ids(prefix)) {
+        const rest = id.slice(prefix.length);
+        const cut = rest.lastIndexOf("/");
+        const key = rest.slice(0, cut);
+        recorded.set(key, Math.max(recorded.get(key) ?? 0, Number(rest.slice(cut + 1)) + 1));
+      }
+      const keys = new Set([...owned.keys(), ...recorded.keys()]);
+      for (const [name, events] of Object.entries(definitions))
+        for (const event of Object.keys(events)) keys.add(`${name}/${event}`);
+      const plans = new Map<string, ListPlan>();
+      for (const key of [...keys].sort()) {
+        const cut = key.lastIndexOf("/");
+        const [name, event] = [key.slice(0, cut), key.slice(cut + 1)];
+        // A definition whose source did not sync keeps its items, and their records, as they are.
+        if (frozen.has(name) && !Object.hasOwn(definitions, name)) continue;
+        if (hooks && Object.hasOwn(hooks, event) && !Object.hasOwn(lists, event)) {
+          ledger.report.errors.push(
+            `${tildify(file)} has "hooks.${event}" that isn't a list, so ${name}'s ${agent} hooks for it were not synced`,
+          );
+          continue;
+        }
+        const list = lists[event] ?? [];
+        const have = owned.get(key) ?? [];
+        const want = (definitions[name]?.[event] ?? []).map((item) => ({
+          [HOOK_MARK]: name,
+          ...item,
+        }));
+        const plan: ListPlan = plans.get(event) ?? { replace: new Map(), remove: [], add: [] };
+        plans.set(event, plan);
+        const count = Math.max(want.length, have.length, recorded.get(key) ?? 0);
+        for (let nth = 0; nth < count; nth++) {
+          const id = `${prefix}${name}/${event}/${nth}`;
+          const index = have[nth];
+          const decision = decideEntry({
+            file,
+            key: `hooks.${event}`,
+            current: index === undefined ? undefined : list[index],
+            record: ledger.record(id, file),
+            desired: want[nth],
+          });
+          done.push({ id, decision, source: name });
+          if (writes(decision))
+            if (index === undefined) plan.add.push(decision.value);
+            else plan.replace.set(index, decision.value);
+          else if (decision.action === "prune" && index !== undefined) plan.remove.push(index);
+        }
+      }
+      const edits: KeyEdit[] = [];
+      for (const [event, { replace, remove, add }] of [...plans].sort(([a], [b]) =>
+        a < b ? -1 : 1,
+      )) {
+        const path = ["hooks", event];
+        const length = lists[event]?.length ?? 0;
+        // An event fleetrc empties goes.
+        if (length > 0 && remove.length === length && add.length === 0) {
+          edits.push({ path });
+          continue;
+        }
+        for (const [item, value] of replace) edits.push({ path, item, value });
+        for (const item of remove.sort((a, b) => b - a)) edits.push({ path, item });
+        add.forEach((value, i) => edits.push({ path, item: length - remove.length + i, value }));
+      }
+      if (root === undefined && edits.length > 0)
+        for (const [key, value] of Object.entries(cell.seed ?? {}))
+          edits.unshift({ path: [key], value });
+      return edits;
+    },
+    { format: cell.format, create: true, dryRun },
+  );
+  if (refused) ledger.report.errors.push(refused);
+  else if (result.error) ledger.report.errors.push(result.error);
+  else if (result.skipped) ledger.skip(file, result.skipped);
+  else for (const { id, decision, source } of done) ledger.settle(id, file, decision, { source });
 }
 
 /** Grok's hooks: one file per definition, `~/.grok/hooks/fleetrc-<source>.json`. */

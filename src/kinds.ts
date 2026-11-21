@@ -34,10 +34,25 @@ export interface McpCell {
   key: readonly string[];
 }
 
-/** How fleetrc gives an agent its hooks. */
+/**
+ * How fleetrc gives an agent its hooks:
+ * - `plugin`: a plugin folder fleetrc owns (Claude Code);
+ * - `file`: a hooks.json whose groups keep their slots, since the agent keys approval by position
+ *   (Codex);
+ * - `entries`: marked entries under `hooks` in a JSON file the agent shares with the user, each
+ *   added, changed or removed alone (Gemini CLI, Cursor);
+ * - `files`: one owned file per definition (Grok).
+ */
 export type AgentHooksCell =
   | { style: "plugin" }
   | { style: "file"; file: () => string }
+  | {
+      style: "entries";
+      file: () => string;
+      format: "json" | "jsonc";
+      /** Top-level keys a file fleetrc creates starts with. */
+      seed?: Record<string, unknown>;
+    }
   | { style: "files"; dir: () => string; prefix: string };
 
 export interface AgentKinds {
@@ -57,6 +72,7 @@ const env = (name: string) => process.env[name]?.trim() || undefined;
 const codexHome = () => env("CODEX_HOME") ?? join(homedir(), ".codex");
 const grokHome = () => env("GROK_HOME") ?? join(homedir(), ".grok");
 const configHome = () => xdgDir("XDG_CONFIG_HOME") ?? join(homedir(), ".config");
+const geminiSettings = () => join(homedir(), ".gemini", "settings.json");
 
 /** The agents fleetrc links files into, by `skills` agent id. */
 export const AGENT_KINDS: Readonly<Record<string, AgentKinds>> = {
@@ -102,12 +118,14 @@ export const AGENT_KINDS: Readonly<Record<string, AgentKinds>> = {
     // https://geminicli.com/docs/core/subagents/: "User-level: `~/.gemini/agents/*.md`".
     subagents: "agents",
     commands: "commands",
-    // https://geminicli.com/docs/tools/mcp-server/: the `mcpServers` object of settings.json.
-    mcp: {
-      file: () => join(homedir(), ".gemini", "settings.json"),
-      format: "json",
-      key: ["mcpServers"],
-    },
+    // https://geminicli.com/docs/tools/mcp-server/: the `mcpServers` object of settings.json,
+    // which Gemini CLI reads through strip-json-comments (packages/cli/src/config/settings.ts), so
+    // it is edited as JSONC.
+    mcp: { file: () => geminiSettings(), format: "jsonc", key: ["mcpServers"] },
+    // https://geminicli.com/docs/hooks/: matcher groups under `hooks.<Event>` of
+    // ~/.gemini/settings.json. Gemini CLI ignores a group's keys besides `matcher`, `sequential`
+    // and `hooks` (packages/core/src/hooks/hookRegistry.ts), so fleetrc marks its groups there.
+    agentHooks: { style: "entries", file: () => geminiSettings(), format: "jsonc" },
   },
   opencode: {
     home: () => join(configHome(), "opencode"),
@@ -142,6 +160,15 @@ export const AGENT_KINDS: Readonly<Record<string, AgentKinds>> = {
       file: () => join(homedir(), ".cursor", "mcp.json"),
       format: "json",
       key: ["mcpServers"],
+    },
+    // https://cursor.com/docs/agent/hooks: user hooks in `~/.cursor/hooks.json`, `{"version": 1,
+    // "hooks": {"<event>": [script, …]}}`. cursor-agent's validator (validators/hooksConfig.js)
+    // checks a script's known fields only, so fleetrc marks its scripts with a key of its own.
+    agentHooks: {
+      style: "entries",
+      file: () => join(homedir(), ".cursor", "hooks.json"),
+      format: "json",
+      seed: { version: 1 },
     },
   },
   "github-copilot": {

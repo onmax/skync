@@ -5,12 +5,14 @@
 //   - Codex: matcher groups appended to `$CODEX_HOME/hooks.json`, marked as fleetrc's, without
 //     moving any other group, since Codex keys each hook's approval by its position.
 //   - Grok: one owned file per definition, `~/.grok/hooks/fleetrc-<name>.json`.
+//   - Gemini CLI: matcher groups under `hooks` in ~/.gemini/settings.json, and Cursor: scripts under
+//     `hooks` in ~/.cursor/hooks.json, each marked as fleetrc's (entrysync.ts).
 // No hook is trusted on the user's behalf: Codex asks for each new or changed one in /hooks.
 import { dict, isRecord } from "./fs.ts";
 import { segmentProblem } from "./names.ts";
 
 /** Agents whose hooks fleetrc syncs. */
-export const HOOK_DEF_AGENTS = ["claude-code", "codex", "grok"] as const;
+export const HOOK_DEF_AGENTS = ["claude-code", "codex", "grok", "gemini-cli", "cursor"] as const;
 export type HookDefAgent = (typeof HOOK_DEF_AGENTS)[number];
 
 /** A handler as the definition file wrote it, checked against the agent's fields. */
@@ -18,11 +20,18 @@ export type HookHandlerDef = Record<string, unknown> & { type: string };
 
 export interface HookGroup {
   matcher?: string | string[];
+  sequential?: boolean;
   hooks: HookHandlerDef[];
 }
 
-/** Matcher groups by event name, as in every hooks file's `"hooks"` object. */
-export type HookEvents = Record<string, HookGroup[]>;
+/**
+ * What an event lists: matcher groups, or for Cursor, whose file has no groups, the scripts
+ * themselves.
+ */
+export type HookItem = HookGroup | HookHandlerDef;
+
+/** The items of each event, as in every hooks file's `"hooks"` object. */
+export type HookEvents = Record<string, HookItem[]>;
 
 /** A hook definition file that its agent would refuse or misread. */
 export class HookFileError extends Error {}
@@ -31,16 +40,27 @@ interface Format {
   /** Keys allowed beside `"hooks"` at the top of the file. */
   top: string[];
   events: string[];
+  /** Keys a matcher group takes besides `"matcher"` and `"hooks"`. */
+  groupKeys: string[];
+  /** Cursor lists handlers under each event, with no matcher groups. */
+  flat: boolean;
+  /** The type of a handler that names none; without it, `type` is required. */
+  defaultType?: string;
+  /** Checks a handler's fields beyond the ones every format shares. */
+  check?: (handler: Record<string, unknown>, at: string) => void;
   /** Fields of each handler type, `type` and the fields every type takes included. */
   handlers: Record<string, string[]>;
   /** Grok also takes a list of names as a matcher. */
   matcherList: boolean;
   /** Grok accepts a timeout of 0 (its default); the others want a positive number. */
   zeroTimeout: boolean;
+  /** What `timeout` counts, seconds unless named. */
+  timeoutUnit?: string;
 }
 
 const CLAUDE_COMMON = ["type", "if", "timeout", "statusMessage", "once"];
 const CODEX_COMMON = ["type", "timeout", "statusMessage", "onFailure"];
+const CURSOR_COMMON = ["type", "timeout", "matcher", "failClosed", "loop_limit"];
 
 /**
  * - Claude Code: events, handler types and fields from https://code.claude.com/docs/en/hooks; a
@@ -52,6 +72,15 @@ const CODEX_COMMON = ["type", "timeout", "statusMessage", "onFailure"];
  *   refused here.
  * - Grok: ~/.grok/docs/user-guide/10-hooks.md, shipped with grok 1.0.92 ("Grok reads only `type`,
  *   `command`, `args`, `url`, `timeout`, `failClosed`, `onFailure`, and `env` from a handler").
+ * - Gemini CLI: https://geminicli.com/docs/hooks/reference/ (events, `matcher`, `sequential`, and a
+ *   "command" handler's `command`, `name`, `description` and `timeout` in milliseconds), and
+ *   google-gemini/gemini-cli packages/core/src/hooks/types.ts, whose `CommandHookConfig` also takes
+ *   `env`. A group needs `type`: hookRegistry.ts drops a handler without one.
+ * - Cursor: https://cursor.com/docs/agent/hooks, and the validator cursor-agent 2026.11.19 ships
+ *   (validators/hooksConfig.js): `version` beside `hooks`; under each event a list of scripts, each
+ *   `command`, or `"type": "prompt"` with `prompt` and an optional `model`, plus `timeout` in
+ *   seconds, a regex `matcher`, `failClosed` and `loop_limit`. `type` defaults to "command". An
+ *   unknown event makes Cursor drop the whole file.
  */
 const FORMATS: Record<HookDefAgent, Format> = {
   "claude-code": {
@@ -98,6 +127,8 @@ const FORMATS: Record<HookDefAgent, Format> = {
       prompt: [...CLAUDE_COMMON, "prompt", "model"],
       agent: [...CLAUDE_COMMON, "prompt", "model"],
     },
+    groupKeys: [],
+    flat: false,
     matcherList: false,
     zeroTimeout: false,
   },
@@ -130,6 +161,8 @@ const FORMATS: Record<HookDefAgent, Format> = {
       ],
       mcp_tool: [...CODEX_COMMON, "server", "tool", "input"],
     },
+    groupKeys: [],
+    flat: false,
     matcherList: false,
     zeroTimeout: false,
   },
@@ -166,8 +199,97 @@ const FORMATS: Record<HookDefAgent, Format> = {
       ],
       http: ["type", "url", "timeout", "failClosed", "fail_closed", "onFailure", "env"],
     },
+    groupKeys: [],
+    flat: false,
     matcherList: true,
     zeroTimeout: true,
+  },
+  "gemini-cli": {
+    top: [],
+    events: [
+      "BeforeTool",
+      "AfterTool",
+      "BeforeAgent",
+      "AfterAgent",
+      "Notification",
+      "SessionStart",
+      "SessionEnd",
+      "PreCompress",
+      "BeforeModel",
+      "AfterModel",
+      "BeforeToolSelection",
+    ],
+    handlers: { command: ["type", "command", "name", "description", "timeout", "env"] },
+    groupKeys: ["sequential"],
+    flat: false,
+    matcherList: false,
+    zeroTimeout: false,
+    timeoutUnit: "milliseconds",
+    check: (handler, at) => {
+      for (const field of ["name", "description"])
+        if (handler[field] !== undefined && typeof handler[field] !== "string")
+          throw new Error(`${at} has "${field}" that isn't a string`);
+    },
+  },
+  cursor: {
+    top: ["version"],
+    events: [
+      "sessionStart",
+      "sessionEnd",
+      "preToolUse",
+      "postToolUse",
+      "postToolUseFailure",
+      "subagentStart",
+      "subagentStop",
+      "beforeShellExecution",
+      "afterShellExecution",
+      "beforeMCPExecution",
+      "afterMCPExecution",
+      "beforeReadFile",
+      "afterFileEdit",
+      "beforeSubmitPrompt",
+      "preCompact",
+      "stop",
+      "afterAgentResponse",
+      "afterAgentThought",
+      "beforeTabFileRead",
+      "afterTabFileEdit",
+      "workspaceOpen",
+    ],
+    handlers: {
+      command: [...CURSOR_COMMON, "command"],
+      prompt: [...CURSOR_COMMON, "prompt", "model"],
+    },
+    groupKeys: [],
+    flat: true,
+    defaultType: "command",
+    matcherList: false,
+    zeroTimeout: false,
+    check: (handler, at) => {
+      const { matcher, model, failClosed, loop_limit: limit } = handler;
+      if (matcher !== undefined) {
+        if (typeof matcher !== "string")
+          throw new Error(`${at} has a "matcher" that isn't a string`);
+        if (matcher !== "" && matcher !== "*")
+          try {
+            new RegExp(matcher);
+          } catch {
+            throw new Error(`${at} has "matcher" ${JSON.stringify(matcher)}, which isn't a regex`);
+          }
+      }
+      if (model !== undefined && (typeof model !== "string" || model.trim() === ""))
+        throw new Error(`${at} has "model" that isn't a non-empty string`);
+      if (failClosed !== undefined && typeof failClosed !== "boolean")
+        throw new Error(`${at} has "failClosed" that isn't true or false`);
+      if (
+        limit !== undefined &&
+        limit !== null &&
+        !(Number.isInteger(limit) && (limit as number) > 0)
+      )
+        throw new Error(
+          `${at} has "loop_limit" ${JSON.stringify(limit)}; give a positive integer or null`,
+        );
+    },
   },
 };
 
@@ -184,7 +306,12 @@ const REQUIRED: Record<string, string[]> = {
 
 function checkHandler(format: Format, handler: unknown, at: string): HookHandlerDef {
   if (!isRecord(handler)) throw new Error(`${at} must be an object`);
-  const type = typeof handler.type === "string" ? handler.type : "";
+  const type =
+    typeof handler.type === "string"
+      ? handler.type
+      : handler.type === undefined && format.defaultType
+        ? format.defaultType
+        : "";
   const fields = format.handlers[type];
   if (!fields)
     throw new Error(
@@ -204,7 +331,9 @@ function checkHandler(format: Format, handler: unknown, at: string): HookHandler
       timeout < 0 ||
       (timeout === 0 && !format.zeroTimeout))
   )
-    throw new Error(`${at} has "timeout" ${JSON.stringify(timeout)}; give a number of seconds`);
+    throw new Error(
+      `${at} has "timeout" ${JSON.stringify(timeout)}; give a number of ${format.timeoutUnit ?? "seconds"}`,
+    );
   if (
     handler.args !== undefined &&
     (!Array.isArray(handler.args) || handler.args.some((arg) => typeof arg !== "string"))
@@ -217,14 +346,20 @@ function checkHandler(format: Format, handler: unknown, at: string): HookHandler
         Object.values(handler[map]).some((value) => typeof value !== "string"))
     )
       throw new Error(`${at} has "${map}" that isn't an object of strings`);
+  format.check?.(handler, at);
   return handler as HookHandlerDef;
 }
 
 function checkGroup(format: Format, group: unknown, at: string): HookGroup {
   if (!isRecord(group)) throw new Error(`${at} must be an object with "hooks"`);
-  const unknown = Object.keys(group).filter((key) => key !== "matcher" && key !== "hooks");
+  const keys = ["matcher", ...format.groupKeys, "hooks"];
+  const unknown = Object.keys(group).filter((key) => !keys.includes(key));
   if (unknown.length > 0)
-    throw new Error(`${at} has ${quoted(unknown)}; a matcher group has "matcher" and "hooks"`);
+    throw new Error(
+      `${at} has ${quoted(unknown)}; a matcher group has ${quoted(keys.slice(0, -1))} and "hooks"`,
+    );
+  if (group.sequential !== undefined && typeof group.sequential !== "boolean")
+    throw new Error(`${at} has "sequential" that isn't true or false`);
   const matcher = group.matcher;
   const isList =
     format.matcherList &&
@@ -238,6 +373,7 @@ function checkGroup(format: Format, group: unknown, at: string): HookGroup {
     throw new Error(`${at} needs "hooks", a non-empty list`);
   return {
     ...(matcher === undefined ? {} : { matcher: matcher as string | string[] }),
+    ...(group.sequential === undefined ? {} : { sequential: group.sequential }),
     hooks: group.hooks.map((handler, index) =>
       checkHandler(format, handler, `${at}.hooks[${index}]`),
     ),
@@ -246,7 +382,8 @@ function checkGroup(format: Format, group: unknown, at: string): HookGroup {
 
 /**
  * Parses a hook definition file in `agent`'s own format, `{"hooks": {"<Event>": [{"matcher"?,
- * "hooks": [handler, …]}]}}`, and throws `HookFileError` naming the first mistake.
+ * "hooks": [handler, …]}]}}` (Cursor's: `{"version"?, "hooks": {"<event>": [handler, …]}}`), and
+ * throws `HookFileError` naming the first mistake.
  */
 export function parseHookFile(
   agent: HookDefAgent,
@@ -268,14 +405,23 @@ export function parseHookFile(
       throw new Error(
         `has ${quoted(unknown)} at the top; ${agent} takes ${quoted(["hooks", ...format.top])}`,
       );
-    const events = dict<HookGroup[]>();
+    if (
+      json.version !== undefined &&
+      !(Number.isInteger(json.version) && (json.version as number) >= 1)
+    )
+      throw new Error(`has "version" ${JSON.stringify(json.version)}; give a positive integer`);
+    const events = dict<HookItem[]>();
     for (const [event, groups] of Object.entries(json.hooks)) {
       if (!format.events.includes(event))
         throw new Error(`has event "${event}", which ${agent} doesn't fire`);
       if (!Array.isArray(groups))
-        throw new Error(`hooks.${event} must be a list of matcher groups`);
+        throw new Error(
+          `hooks.${event} must be a list of ${format.flat ? "hook scripts" : "matcher groups"}`,
+        );
       events[event] = groups.map((group, index) =>
-        checkGroup(format, group, `hooks.${event}[${index}]`),
+        format.flat
+          ? checkHandler(format, group, `hooks.${event}[${index}]`)
+          : checkGroup(format, group, `hooks.${event}[${index}]`),
       );
     }
     return events;
@@ -291,7 +437,7 @@ export function hookNameProblem(name: string): string | undefined {
 
 /** The groups of several definitions as one event map, in name order. */
 function merged(definitions: Record<string, HookEvents>): HookEvents {
-  const events = dict<HookGroup[]>();
+  const events = dict<HookItem[]>();
   for (const name of Object.keys(definitions).sort())
     for (const [event, groups] of Object.entries(definitions[name]!))
       events[event] = [...(events[event] ?? []), ...groups];
@@ -353,11 +499,14 @@ export function grokHookFiles(definitions: Record<string, HookEvents>): Record<s
 }
 
 /**
- * The key that marks a matcher group in Codex's hooks.json as fleetrc's, holding the definition's
- * name. Codex ignores keys it doesn't know inside a group (codex 0.171.0 ran a marked group's hook);
- * only the file's top level refuses them.
+ * The key that marks a hook entry as fleetrc's, holding the definition's name: a matcher group in
+ * Codex's hooks.json or Gemini CLI's settings.json, a script in Cursor's hooks.json. Each ignores
+ * keys it doesn't know there: Codex inside a group (codex 0.171.0 ran a marked group's hook) though
+ * not at the file's top level, Gemini CLI in a group (hookRegistry.ts reads only `matcher`,
+ * `sequential` and `hooks`), Cursor in a script (validators/hooksConfig.js checks known fields
+ * only).
  */
-export const CODEX_MARK = "fleetrc";
+export const HOOK_MARK = "fleetrc";
 
 /** Where a group fleetrc owns sits in Codex's hooks.json. */
 export interface CodexSlot {
@@ -377,18 +526,18 @@ export interface CodexHooks {
 }
 
 /** A slot fleetrc has given up: no hooks, so Codex runs nothing there, and later groups stay put. */
-const placeholder = () => ({ [CODEX_MARK]: "", hooks: [] });
+const placeholder = () => ({ [HOOK_MARK]: "", hooks: [] });
 
 const isPlaceholder = (group: unknown) =>
   isRecord(group) &&
-  group[CODEX_MARK] === "" &&
+  group[HOOK_MARK] === "" &&
   Array.isArray(group.hooks) &&
   group.hooks.length === 0 &&
   Object.keys(group).length === 2;
 
 const ownerOf = (group: unknown) =>
-  isRecord(group) && typeof group[CODEX_MARK] === "string" && group[CODEX_MARK] !== ""
-    ? group[CODEX_MARK]
+  isRecord(group) && typeof group[HOOK_MARK] === "string" && group[HOOK_MARK] !== ""
+    ? group[HOOK_MARK]
     : undefined;
 
 const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
@@ -428,7 +577,7 @@ export function codexHooksWith(current: unknown, desired: Record<string, HookEve
     const wanted = new Map(
       names.map((name) => [
         name,
-        (desired[name]![event] ?? []).map((group) => ({ [CODEX_MARK]: name, ...group })),
+        (desired[name]![event] ?? []).map((group) => ({ [HOOK_MARK]: name, ...group })),
       ]),
     );
     const seen = new Map<string, number>();

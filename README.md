@@ -277,16 +277,19 @@ Codex expands no variables. An env value that is a variable of the same name, su
   "agentHooks": {
     "claude-code": "hooks/claude.json",
     "codex": "hooks/codex.json",
-    "grok": "hooks/grok.json"
+    "grok": "hooks/grok.json",
+    "gemini-cli": "hooks/gemini.json",
+    "cursor": "hooks/cursor.json"
   }
 }
 ```
 
-Each file is `{ "hooks": { "<Event>": [ ...groups ] } }`, as the agent documents it.
+Each file is `{ "hooks": { "<Event>": [ ...groups ] } }`, as the agent documents it. Cursor's lists scripts under each event instead of groups, `{ "version": 1, "hooks": { "<event>": [ ...scripts ] } }`.
 
 - Claude Code's hooks go into a plugin fleetrc writes at `~/.claude/skills/fleetrc/`, which Claude Code loads as `fleetrc@skills-dir`. fleetrc never writes them into `settings.json`, and never copies them to Grok, so no hook runs twice. `fleetrc doctor` checks that `claude plugin list` shows the plugin. The folder goes away when no Claude Code hooks are left.
 - Codex's go into `~/.codex/hooks.json`, each group marked with `"fleetrc": "<source>"`. Codex runs a new or changed hook only after you approve it in `/hooks`, and each sync that adds one says so. A removed group leaves an empty placeholder, so your own groups keep their place and their approval.
 - Grok's go into `~/.grok/hooks/fleetrc-<source>.json`. Grok also reads `~/.claude/settings.json`, so `fleetrc doctor` warns when a command is in both under the same event.
+- Gemini CLI's go under `hooks` in `~/.gemini/settings.json`, and Cursor's into `~/.cursor/hooks.json`, which fleetrc creates with `"version": 1`. Each group or script is marked with `"fleetrc": "<source>"` and added, changed or removed on its own; your own hooks, comments and settings in the file stay as they are.
 - Edits, removal, held entries and `--dry-run` work as for MCP servers.
 
 `mcp` and `agentHooks` run commands on your machines, so only your own config can set them: an extended config's are ignored, with a warning. `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `GROK_HOME`, `COPILOT_HOME` and `XDG_CONFIG_HOME` move these files too.

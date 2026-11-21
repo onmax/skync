@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 import {
   claudePluginFiles,
-  CODEX_MARK,
+  HOOK_MARK,
   codexHooksWith,
   grokHookFiles,
   grokHookName,
@@ -56,6 +56,81 @@ describe("parseHookFile", () => {
         }),
       ).Stop,
     ).toHaveLength(1);
+  });
+
+  it("reads Gemini CLI's groups and Cursor's flat scripts", () => {
+    const gemini = {
+      BeforeTool: [
+        {
+          matcher: "write_file|replace",
+          sequential: true,
+          hooks: [{ ...command("guard"), name: "guard", timeout: 5000, env: { A: "1" } }],
+        },
+      ],
+      SessionStart: [{ hooks: [command("hello")] }],
+    };
+    expect(parseHookFile("gemini-cli", hooksFile(gemini))).toEqual(gemini);
+    const cursor = {
+      preToolUse: [
+        { command: "./guard.sh", matcher: "Shell", timeout: 30, failClosed: true },
+        { type: "prompt", prompt: "Is this safe?", model: "fast" },
+      ],
+      stop: [{ command: "./again.sh", loop_limit: null }],
+    };
+    expect(parseHookFile("cursor", hooksFile(cursor, { version: 1 }))).toEqual(cursor);
+  });
+
+  it("rejects Gemini CLI and Cursor files with a message naming the mistake", () => {
+    const cases: Array<[Parameters<typeof parseHookFile>[0], string, string]> = [
+      ["gemini-cli", hooksFile({ PreToolUse: [] }), `has event "PreToolUse", which gemini-cli`],
+      [
+        "gemini-cli",
+        hooksFile({ BeforeTool: [{ hooks: [{ command: "x" }] }] }),
+        `hooks.BeforeTool[0].hooks[0] has type undefined; use "command"`,
+      ],
+      [
+        "gemini-cli",
+        hooksFile({ BeforeTool: [{ hooks: [{ ...command("x"), timeout: 0 }] }] }),
+        `give a number of milliseconds`,
+      ],
+      [
+        "gemini-cli",
+        hooksFile({ BeforeTool: [{ sequential: "yes", hooks: [command("x")] }] }),
+        `has "sequential" that isn't true or false`,
+      ],
+      [
+        "gemini-cli",
+        hooksFile({ BeforeTool: [{ when: "x", hooks: [command("x")] }] }),
+        `a matcher group has "matcher", "sequential" and "hooks"`,
+      ],
+      [
+        "cursor",
+        hooksFile({ PreToolUse: [] }),
+        `has event "PreToolUse", which cursor doesn't fire`,
+      ],
+      [
+        "cursor",
+        hooksFile({ stop: [{ hooks: [command("x")] }] }),
+        `hooks.stop[0] has "hooks", which a "command" hook doesn't take here`,
+      ],
+      ["cursor", hooksFile({ stop: [{ matcher: "(" }] }), `needs "command", a non-empty string`],
+      ["cursor", hooksFile({ stop: [{ command: "x", matcher: "(" }] }), `which isn't a regex`],
+      ["cursor", hooksFile({ stop: [{ type: "prompt", prompt: "p", model: "" }] }), `"model"`],
+      [
+        "cursor",
+        hooksFile({ stop: [{ command: "x", loop_limit: 0 }] }),
+        `"loop_limit" 0; give a positive integer or null`,
+      ],
+      ["cursor", hooksFile({ stop: [{ command: "x", failClosed: 1 }] }), `"failClosed"`],
+      ["cursor", hooksFile({}, { version: "1" }), `has "version" "1"; give a positive integer`],
+      ["cursor", hooksFile({}, { description: "x" }), `cursor takes "hooks", "version"`],
+    ];
+    for (const [agent, text, message] of cases) {
+      expect(() => parseHookFile(agent, text, "hooks.json"), `${agent} ${text}`).toThrow(
+        HookFileError,
+      );
+      expect(() => parseHookFile(agent, text, "hooks.json"), `${agent} ${text}`).toThrow(message);
+    }
   });
 
   it("rejects invalid files with a message naming the mistake", () => {
@@ -213,7 +288,7 @@ describe("codexHooksWith", () => {
   it("appends to a missing file and marks the groups", () => {
     const result = codexHooksWith(undefined, { log: LOG });
     expect(result.file).toEqual({
-      hooks: { SessionStart: [{ [CODEX_MARK]: "log", ...LOG.SessionStart![0] }] },
+      hooks: { SessionStart: [{ [HOOK_MARK]: "log", ...LOG.SessionStart![0] }] },
     });
     expect(result.changed).toBe(true);
     expect(result.slots).toEqual([{ name: "log", event: "SessionStart", index: 0 }]);
@@ -232,9 +307,9 @@ describe("codexHooksWith", () => {
     const after = first.file.hooks as Record<string, unknown[]>;
     expect(first.file.description).toBe("mine");
     expect(after.SessionStart!.slice(0, 2)).toEqual(current.hooks.SessionStart);
-    expect(after.SessionStart![2]).toEqual({ [CODEX_MARK]: "log", ...LOG.SessionStart![0] });
+    expect(after.SessionStart![2]).toEqual({ [HOOK_MARK]: "log", ...LOG.SessionStart![0] });
     expect(after.PreToolUse).toEqual(current.hooks.PreToolUse);
-    expect(after.PostToolUse).toEqual([{ [CODEX_MARK]: "format", ...FORMAT.PostToolUse![0] }]);
+    expect(after.PostToolUse).toEqual([{ [HOOK_MARK]: "format", ...FORMAT.PostToolUse![0] }]);
 
     // A user adds a group after ours; then ours changes, and then goes.
     after.SessionStart!.push(user("later"));
@@ -246,21 +321,21 @@ describe("codexHooksWith", () => {
     expect(changedHooks.SessionStart!.map((group) => JSON.stringify(group))).toEqual([
       JSON.stringify(fleetSessionHook),
       JSON.stringify(user("echo hi")),
-      JSON.stringify({ [CODEX_MARK]: "log", hooks: [command("log-v2")] }),
+      JSON.stringify({ [HOOK_MARK]: "log", hooks: [command("log-v2")] }),
       JSON.stringify(user("later")),
     ]);
     expect(changed.review).toEqual([{ name: "log", event: "SessionStart", index: 2 }]);
 
     const removed = codexHooksWith(changed.file, { format: FORMAT });
     const removedHooks = removed.file.hooks as Record<string, unknown[]>;
-    expect(removedHooks.SessionStart![2]).toEqual({ [CODEX_MARK]: "", hooks: [] });
+    expect(removedHooks.SessionStart![2]).toEqual({ [HOOK_MARK]: "", hooks: [] });
     expect(removedHooks.SessionStart![3]).toEqual(user("later"));
     expect(removed.review).toEqual([]);
 
     // A new group takes the free slot instead of going to the end.
     const reused = codexHooksWith(removed.file, { format: FORMAT, log: LOG });
     expect((reused.file.hooks as Record<string, unknown[]>).SessionStart![2]).toEqual({
-      [CODEX_MARK]: "log",
+      [HOOK_MARK]: "log",
       ...LOG.SessionStart![0],
     });
     expect(reused.review).toEqual([{ name: "log", event: "SessionStart", index: 2 }]);
@@ -299,7 +374,7 @@ describe("codexHooksWith", () => {
     const next = codexHooksWith(first.file, { two: { SessionStart: [{ hooks: [command("a")] }] } });
     expect((next.file.hooks as Record<string, unknown[]>).SessionStart).toEqual([
       user("x"),
-      { [CODEX_MARK]: "two", hooks: [command("a")] },
+      { [HOOK_MARK]: "two", hooks: [command("a")] },
       user("between"),
     ]);
   });
