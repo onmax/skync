@@ -109,7 +109,11 @@ interface Definitions {
   warnings: string[];
 }
 
-function collect(sources: readonly EntrySource[], keep: ReadonlySet<string>): Definitions {
+function collect(
+  sources: readonly EntrySource[],
+  keep: ReadonlySet<string>,
+  records: Readonly<Record<string, OwnedEntry>>,
+): Definitions {
   const defs: Definitions = {
     servers: dict(),
     owner: new Map(),
@@ -134,9 +138,22 @@ function collect(sources: readonly EntrySource[], keep: ReadonlySet<string>): De
     if (server) defs.servers[name] = server;
     else defs.broken.add(name);
   };
+  // A source that did not sync still holds the names it last synced, so a later source's server
+  // of the same name doesn't replace them.
+  const freezeMcp = (source: string) => {
+    defs.frozenMcp.add(source);
+    const names = new Set<string>();
+    for (const [id, record] of Object.entries(records))
+      if (id.startsWith("mcp/") && record.source === source)
+        names.add(id.slice(id.indexOf("/", "mcp/".length) + 1));
+    for (const name of [...names].sort()) claim(name, source);
+  };
+  // A source that only an unreadable manifest declares is not among `sources`.
+  const present = new Set(sources.map((source) => source.id));
+  for (const source of [...keep].sort()) if (!present.has(source)) freezeMcp(source);
   for (const source of sources) {
     if (source.error || keep.has(source.id)) {
-      defs.frozenMcp.add(source.id);
+      freezeMcp(source.id);
       for (const agent of HOOK_DEF_AGENTS) defs.frozenHooks[agent].add(source.id);
       continue;
     }
@@ -145,7 +162,7 @@ function collect(sources: readonly EntrySource[], keep: ReadonlySet<string>): De
       if (entry.kind === "mcp") {
         if (entry.text === undefined) {
           defs.warnings.push(`${at} could not be read, so its MCP servers stay as last synced`);
-          defs.frozenMcp.add(source.id);
+          freezeMcp(source.id);
           continue;
         }
         let parsed;
@@ -154,7 +171,7 @@ function collect(sources: readonly EntrySource[], keep: ReadonlySet<string>): De
         } catch (error) {
           if (!(error instanceof McpFileError)) throw error;
           defs.warnings.push(`${error.message}; its MCP servers stay as last synced`);
-          defs.frozenMcp.add(source.id);
+          freezeMcp(source.id);
           continue;
         }
         for (const problem of parsed.problems) {
@@ -288,7 +305,7 @@ export function syncEntries(
     errors: [],
   };
   const ledger = new Ledger(state.entries ?? dict(), report);
-  const defs = collect(sources, keep);
+  const defs = collect(sources, keep, ledger.records);
   report.shadowed.push(...defs.shadowed);
   report.warnings.push(...defs.warnings);
   const chosen = new Set(agents);
@@ -350,18 +367,45 @@ function syncMcp(
   const file = cell.file();
   const prefix = `mcp/${agent}/`;
   const desired = desiredServers(agent, chosen, defs, ledger.report.warnings);
-  const names = [
-    ...new Set([
-      ...Object.keys(desired),
-      ...ledger.ids(prefix).map((id) => id.slice(prefix.length)),
-    ]),
-  ].filter((name) => {
-    if (Object.hasOwn(desired, name)) return true;
-    // A server whose definition has a mistake, or whose source did not sync, stays as it is.
+  // A server whose definition has a mistake, or whose source did not sync, stays as it is.
+  const settled = (name: string) => {
     if (defs.broken.has(name)) return false;
     const source = ledger.records[prefix + name]?.source;
     return !(source !== undefined && defs.frozenMcp.has(source) && !defs.owner.has(name));
-  });
+  };
+  // A server recorded in another file, since the agent's file moved (OpenCode's opencode.json
+  // gave way to opencode.jsonc, or CLAUDE_CONFIG_DIR changed), is pruned there unless edited.
+  const elsewhere = new Map<string, string[]>();
+  const here: string[] = [];
+  for (const id of ledger.ids(prefix)) {
+    const name = id.slice(prefix.length);
+    const recorded = ledger.records[id]!.file;
+    if (recorded === file) here.push(name);
+    else if (settled(name)) elsewhere.set(recorded, [...(elsewhere.get(recorded) ?? []), name]);
+  }
+  for (const [old, list] of elsewhere)
+    mergeMcp(old, cell, prefix, list, dict(), defs, ledger, dryRun, false);
+  // One still recorded in the old file (held there, edited) moves once it goes from there.
+  const names = [...new Set([...Object.keys(desired), ...here])].filter(
+    (name) =>
+      (Object.hasOwn(desired, name) || settled(name)) &&
+      (ledger.next[prefix + name]?.file ?? file) === file,
+  );
+  mergeMcp(file, cell, prefix, names, desired, defs, ledger, dryRun, true);
+}
+
+/** Merges `desired` into `file`, for `names`: the servers wanted there and the ones recorded. */
+function mergeMcp(
+  file: string,
+  cell: McpCell,
+  prefix: string,
+  names: readonly string[],
+  desired: Record<string, McpEntry>,
+  defs: Definitions,
+  ledger: Ledger,
+  dryRun: boolean,
+  create: boolean,
+) {
   if (names.length === 0) return;
   const decide = (name: string, current: unknown) =>
     decideEntry({
@@ -375,6 +419,10 @@ function syncMcp(
     for (const { name, decision } of done)
       ledger.settle(prefix + name, file, decision, { source: defs.owner.get(name) });
   };
+  if (!create && !lstat(file)) {
+    settle(names.map((name) => ({ name, decision: decide(name, undefined) })));
+    return;
+  }
 
   if (cell.format !== "toml") {
     let done: { name: string; decision: EntryDecision }[] = [];
@@ -393,7 +441,7 @@ function syncMcp(
         }
         return edits;
       },
-      { format: cell.format, create: true, dryRun },
+      { format: cell.format, create, dryRun },
     );
     if (result.error) ledger.report.errors.push(result.error);
     else if (result.skipped) ledger.skip(file, result.skipped);
@@ -923,9 +971,10 @@ export async function diffEntry(spec: string, id: string): Promise<string> {
   if (!cell) throw new UserError(`fleetrc writes no MCP servers for ${agent}`);
   const loaded = await loadManifest(spec, { offline: true });
   const state = loadState();
-  const defs = collect(offlineSources(loaded.sources, state), new Set());
+  const defs = collect(offlineSources(loaded.sources, state), new Set(), state.entries ?? {});
   const desired = mcpEntries(agent, defs.servers).entries[name];
-  const file = cell.file();
+  // The file the entry was written to, which stays its file until a sync moves it.
+  const file = state.entries?.[id]?.file ?? cell.file();
   let current: unknown;
   if (cell.format === "toml") {
     const text = readText(file);
