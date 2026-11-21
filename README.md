@@ -222,6 +222,75 @@ A `git`, `npm` or `local` source can also give your agents their user-level inst
 
 `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `GROK_HOME`, `COPILOT_HOME` and `XDG_CONFIG_HOME` move these folders. Cursor reads none of them at the user level: its docs name only a project's `.cursor/commands`.
 
+### MCP servers
+
+A source in your own config can give every agent the same MCP servers. `mcp` names a file in the source:
+
+```json
+{ "id": "mine", "git": "me/agents", "mcp": "mcp.json" }
+```
+
+```json
+{
+  "mcpServers": {
+    "docs": {
+      "command": "npx",
+      "args": ["-y", "docs-mcp"],
+      "env": { "DOCS_TOKEN": "${DOCS_TOKEN}" }
+    },
+    "search": {
+      "type": "http",
+      "url": "https://search.example.com/mcp",
+      "headers": { "Authorization": "Bearer ${SEARCH_KEY}" }
+    }
+  }
+}
+```
+
+- The file is in Claude Code's format. fleetrc writes each server into every installed agent's own config, translated to that agent's format. A server with `"agents": ["claude-code", "codex"]` goes to those agents only.
+- Secrets never go in the file. Write each one as `${VAR}` and set the variable on each machine. A header with literal text, or a literal value in an env key whose name contains `TOKEN`, `KEY`, `SECRET`, `PASSWORD` or `AUTH`, fails that server, and the other servers still sync.
+- fleetrc changes only the entries it wrote, one key at a time, and keeps the rest of each file, comments included. A server you added by hand is never touched; one with the same name as a manifest server is reported and left alone.
+- If you edit an entry fleetrc wrote, sync keeps your edit and reports it as held. `fleetrc diff mcp/<agent>/<server>` shows your version against the manifest's, and deleting the entry takes the manifest's on the next sync. An entry that already holds what the manifest gives it is adopted.
+- When a server leaves the file, or an agent leaves `agents`, fleetrc removes its entries. A source that fails to fetch, or a file that doesn't parse, keeps them as they are.
+- With `"update": "review"`, a change to the file waits for `fleetrc update <source>`, as a skill's does. `fleetrc list` shows each entry and its file, and `--dry-run` writes nothing.
+
+| Agent          | Config file                                                       | Key           | Variable     |
+| -------------- | ----------------------------------------------------------------- | ------------- | ------------ |
+| Claude Code    | `~/.claude.json`                                                  | `mcpServers`  | `${VAR}`     |
+| Codex          | `~/.codex/config.toml`                                            | `mcp_servers` | see below    |
+| Grok           | `~/.grok/config.toml`                                             | `mcp_servers` | `${VAR}`     |
+| Gemini CLI     | `~/.gemini/settings.json`                                         | `mcpServers`  | `$VAR`       |
+| OpenCode       | `~/.config/opencode/opencode.jsonc`, or `opencode.json` otherwise | `mcp.servers` | `{env:VAR}`  |
+| Cursor         | `~/.cursor/mcp.json`                                              | `mcpServers`  | `${env:VAR}` |
+| GitHub Copilot | `~/.copilot/mcp-config.json`                                      | `mcpServers`  | `${VAR}`     |
+
+Codex expands no variables. An env value that is a variable of the same name, such as `"DOCS_TOKEN": "${DOCS_TOKEN}"`, becomes `env_vars = ["DOCS_TOKEN"]`; a header that is one whole variable goes to `env_http_headers`, and `"Authorization": "Bearer ${KEY}"` becomes `bearer_token_env_var`. Any other use of a variable skips the server for Codex, with a warning. A server over SSE is skipped for Codex and OpenCode, which speak streamable HTTP only. fleetrc skips `~/.claude.json` for one sync when Claude Code holds its lock, and keeps the file readable by you only.
+
+### Hooks
+
+`agentHooks` gives your agents hooks, each agent in its own format. A path goes to Claude Code; an object picks a file per agent:
+
+```json
+{
+  "id": "mine",
+  "git": "me/agents",
+  "agentHooks": {
+    "claude-code": "hooks/claude.json",
+    "codex": "hooks/codex.json",
+    "grok": "hooks/grok.json"
+  }
+}
+```
+
+Each file is `{ "hooks": { "<Event>": [ ...groups ] } }`, as the agent documents it.
+
+- Claude Code's hooks go into a plugin fleetrc writes at `~/.claude/skills/fleetrc/`, which Claude Code loads as `fleetrc@skills-dir`. fleetrc never writes them into `settings.json`, and never copies them to Grok, so no hook runs twice. `fleetrc doctor` checks that `claude plugin list` shows the plugin. The folder goes away when no Claude Code hooks are left.
+- Codex's go into `~/.codex/hooks.json`, each group marked with `"fleetrc": "<source>"`. Codex runs a new or changed hook only after you approve it in `/hooks`, and each sync that adds one says so. A removed group leaves an empty placeholder, so your own groups keep their place and their approval.
+- Grok's go into `~/.grok/hooks/fleetrc-<source>.json`. Grok also reads `~/.claude/settings.json`, so `fleetrc doctor` warns when a command is in both under the same event.
+- Edits, removal, held entries and `--dry-run` work as for MCP servers.
+
+`mcp` and `agentHooks` run commands on your machines, so only your own config can set them: an extended config's are ignored, with a warning. `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `GROK_HOME`, `COPILOT_HOME` and `XDG_CONFIG_HOME` move these files too.
+
 ## Agents and systems
 
 fleetrc links skills into Claude Code, Codex, Gemini CLI, OpenCode, Cursor, GitHub Copilot, and the rest of the agents in Vercel's [`skills`](https://github.com/vercel-labs/skills) package.
