@@ -19,7 +19,7 @@ import {
 } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
-import { basename, delimiter, dirname, join, resolve } from "node:path";
+import { basename, delimiter, dirname, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { gzipSync } from "node:zlib";
 import { afterAll, afterEach } from "vite-plus/test";
@@ -665,6 +665,41 @@ export function publishNpm(
 
 // ---------------------------------------------------------------------------
 // Looking at agent folders.
+
+/** Every file, folder and link under `root`, with contents hashed. */
+export function snapshot(root: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  const walk = (dir: string) => {
+    for (const name of readdirSync(dir)) {
+      const path = join(dir, name);
+      const key = relative(root, path);
+      if (key === "scheduler-calls.jsonl") continue;
+      const stat = lstatSync(path);
+      if (stat.isSymbolicLink()) out[key] = `link ${readlinkSync(path)}`;
+      else if (stat.isDirectory()) {
+        out[key] = "dir";
+        walk(path);
+      } else out[key] = createHash("sha256").update(readFileSync(path)).digest("hex");
+    }
+  };
+  walk(root);
+  return out;
+}
+
+/** A sync report with the MCP servers and hooks it merged (`entries`). */
+export interface EntriesReport extends Report {
+  entries: {
+    total: number;
+    added: string[];
+    updated: string[];
+    removed: string[];
+    adopted: string[];
+    held: { id: string; file: string }[];
+    foreign: { id: string; file: string }[];
+    review: string[];
+    skipped: string[];
+  };
+}
 
 export function isLink(path: string): boolean {
   return lstatSync(path, { throwIfNoEntry: false })?.isSymbolicLink() ?? false;
