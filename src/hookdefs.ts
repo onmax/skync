@@ -165,6 +165,25 @@ const FORMATS: Record<HookDefAgent, Format> = {
     flat: false,
     matcherList: false,
     zeroTimeout: false,
+    // hook_config.rs reads `timeout` as a u64, `async` as a bool, the Windows command (under one
+    // of its two names) as a string, `additionalContextLimit` as a usize and `input` as an object
+    // that TOML can hold; one field of the wrong type makes Codex drop the whole file.
+    check: (handler, at) => {
+      const { timeout, async: background, additionalContextLimit: limit, input } = handler;
+      if (timeout !== undefined && !Number.isSafeInteger(timeout))
+        throw new Error(`${at} has "timeout" ${JSON.stringify(timeout)}; give whole seconds`);
+      if (background !== undefined && typeof background !== "boolean")
+        throw new Error(`${at} has "async" that isn't true or false`);
+      for (const field of ["commandWindows", "command_windows", "statusMessage"])
+        if (handler[field] !== undefined && typeof handler[field] !== "string")
+          throw new Error(`${at} has "${field}" that isn't a string`);
+      if (handler.commandWindows !== undefined && handler.command_windows !== undefined)
+        throw new Error(`${at} has both "commandWindows" and "command_windows"; keep one`);
+      if (limit !== undefined && !(Number.isSafeInteger(limit) && (limit as number) >= 0))
+        throw new Error(`${at} has "additionalContextLimit" that isn't a whole number from 0`);
+      if (input !== undefined && !(isRecord(input) && tomlValue(input)))
+        throw new Error(`${at} has "input" that isn't an object TOML can hold`);
+    },
   },
   grok: {
     top: [],
@@ -303,6 +322,14 @@ const REQUIRED: Record<string, string[]> = {
   prompt: ["prompt"],
   agent: ["prompt"],
 };
+
+/** Whether TOML can hold `value`: no null, and no number past an i64 or that isn't finite. */
+function tomlValue(value: unknown): boolean {
+  if (Array.isArray(value)) return value.every(tomlValue);
+  if (isRecord(value)) return Object.values(value).every(tomlValue);
+  if (typeof value === "number") return Number.isFinite(value) && Math.abs(value) < 2 ** 63;
+  return typeof value === "string" || typeof value === "boolean";
+}
 
 function checkHandler(format: Format, handler: unknown, at: string): HookHandlerDef {
   if (!isRecord(handler)) throw new Error(`${at} must be an object`);
@@ -550,7 +577,8 @@ const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
  *   groups for the event;
  * - one no longer wanted becomes an empty placeholder, unless only placeholders follow it, and
  *   trailing placeholders are dropped;
- * - a new one takes the first placeholder of its event, or is appended.
+ * - a new one takes the first placeholder of its event after the definition's last group, or is
+ *   appended, so a definition's groups keep their order.
  * A group the user edited is the caller's to keep (entries.ts): pass it as it stands in `desired`.
  * `current` is the parsed file, or undefined when there is none. Throws `HookFileError` when it
  * isn't a hooks file.
@@ -593,13 +621,17 @@ export function codexHooksWith(current: unknown, desired: Record<string, HookEve
         review.push({ name: owner, event, index });
       }
     });
-    for (const [name, list] of wanted)
+    for (const [name, list] of wanted) {
+      // A new group goes after the definition's last one, so its groups keep their order.
+      let after = groups.findLastIndex((group) => ownerOf(group) === name);
       for (const group of list.slice(seen.get(name) ?? 0)) {
-        let index = groups.findIndex(isPlaceholder);
+        let index = groups.findIndex((slot, i) => i > after && isPlaceholder(slot));
         if (index === -1) index = groups.push(group) - 1;
         else groups[index] = group;
         review.push({ name, event, index });
+        after = index;
       }
+    }
     while (groups.length > 0 && isPlaceholder(groups.at(-1))) groups.pop();
     groups.forEach((group, index) => {
       const owner = ownerOf(group);

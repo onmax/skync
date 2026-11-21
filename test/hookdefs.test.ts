@@ -157,6 +157,47 @@ describe("parseHookFile", () => {
         `has "version" at the top; codex takes "hooks", "description"`,
       ],
       [
+        "codex",
+        hooksFile({ Stop: [{ hooks: [{ ...command("x"), timeout: 1.5 }] }] }),
+        `hooks.Stop[0].hooks[0] has "timeout" 1.5; give whole seconds`,
+      ],
+      [
+        "codex",
+        hooksFile({ Stop: [{ hooks: [{ ...command("x"), async: "yes" }] }] }),
+        `hooks.Stop[0].hooks[0] has "async" that isn't true or false`,
+      ],
+      [
+        "codex",
+        hooksFile({ Stop: [{ hooks: [{ ...command("x"), commandWindows: ["x"] }] }] }),
+        `hooks.Stop[0].hooks[0] has "commandWindows" that isn't a string`,
+      ],
+      [
+        "codex",
+        hooksFile({
+          Stop: [{ hooks: [{ type: "mcp_tool", server: "s", tool: "t", input: "x" }] }],
+        }),
+        `hooks.Stop[0].hooks[0] has "input" that isn't an object TOML can hold`,
+      ],
+      [
+        "codex",
+        hooksFile({
+          Stop: [{ hooks: [{ type: "mcp_tool", server: "s", tool: "t", input: { a: [null] } }] }],
+        }),
+        `hooks.Stop[0].hooks[0] has "input" that isn't an object TOML can hold`,
+      ],
+      [
+        "codex",
+        hooksFile({
+          Stop: [{ hooks: [{ ...command("x"), commandWindows: "a", command_windows: "b" }] }],
+        }),
+        `hooks.Stop[0].hooks[0] has both "commandWindows" and "command_windows"; keep one`,
+      ],
+      [
+        "codex",
+        hooksFile({ Stop: [{ hooks: [{ ...command("x"), additionalContextLimit: -1 }] }] }),
+        `hooks.Stop[0].hooks[0] has "additionalContextLimit" that isn't a whole number from 0`,
+      ],
+      [
         "grok",
         hooksFile({}, { description: "x" }),
         `has "description" at the top; grok takes "hooks"`,
@@ -376,6 +417,32 @@ describe("codexHooksWith", () => {
       user("x"),
       { [HOOK_MARK]: "two", hooks: [command("a")] },
       user("between"),
+    ]);
+  });
+
+  it("never fills a placeholder before a definition's own groups", () => {
+    const two: HookEvents = {
+      SessionStart: [{ hooks: [command("a")] }, { hooks: [command("b")] }],
+    };
+    // A placeholder left by another definition sits before `two`'s groups.
+    const start = {
+      hooks: {
+        SessionStart: [
+          { [HOOK_MARK]: "", hooks: [] },
+          { [HOOK_MARK]: "two", hooks: [command("a")] },
+          { [HOOK_MARK]: "two", hooks: [command("b")] },
+          user("mine"),
+        ],
+      },
+    };
+    const three = { SessionStart: [...two.SessionStart!, { hooks: [command("c")] }] };
+    const next = codexHooksWith(start, { two: three });
+    expect((next.file.hooks as Record<string, unknown[]>).SessionStart).toEqual([
+      { [HOOK_MARK]: "", hooks: [] },
+      { [HOOK_MARK]: "two", hooks: [command("a")] },
+      { [HOOK_MARK]: "two", hooks: [command("b")] },
+      user("mine"),
+      { [HOOK_MARK]: "two", hooks: [command("c")] },
     ]);
   });
 
