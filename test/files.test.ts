@@ -336,7 +336,8 @@ describe("files across sources", () => {
     });
     await m.json("init", manifest, "--no-hooks");
     vendor.commit({ "AGENTS.md": null, "AGENTS.md/other.md": "replacement\n" });
-    vendor.commit({ "commands/a.md": null, commands: "replacement\n" });
+    vendor.commit({ commands: null });
+    vendor.commit({ commands: "replacement\n" });
     const sync = await m.json<Report>("sync");
     expect(sync.errors).toEqual([]);
     expect(sync.pending.map((entry) => entry.skill).sort()).toEqual([
