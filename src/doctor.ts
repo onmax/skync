@@ -11,7 +11,8 @@ import {
 import { agentTargets, aliasOf, codexLegacyDir } from "./agents.ts";
 import { conflictLines } from "./edits.ts";
 import { exec, git } from "./exec.ts";
-import { isErrno, lstat, sha256 } from "./fs.ts";
+import { isErrno, isRecord, lstat, readJsonOrNothing, sha256 } from "./fs.ts";
+import { CLAUDE_PLUGIN_NAME } from "./hookdefs.ts";
 import { gitUrl, NO_GIT_REDIRECTS } from "./gitcache.ts";
 import { linkTarget, samePath } from "./linker.ts";
 import {
@@ -22,7 +23,7 @@ import {
   teamGitProblem,
   updateConfig,
 } from "./manifest.ts";
-import { paths, tildify } from "./paths.ts";
+import { claudeHome, paths, tildify } from "./paths.ts";
 import { installedBuild, installedCli, launcherNode, launcherPath } from "./selfinstall.ts";
 import { loadState, type State } from "./state.ts";
 import { manifestSpec } from "./sync.ts";
@@ -416,6 +417,10 @@ export async function doctor(manifest?: string): Promise<Check[]> {
   const state = loadState();
   const fileLinks = fileLinksCheck(state);
   if (fileLinks) checks.push(fileLinks);
+  const plugin = await claudePluginCheck();
+  if (plugin) checks.push(plugin);
+  const twice = grokTwiceCheck(state);
+  if (twice) checks.push(twice);
   const conflicts = conflictLines(state);
   checks.push({
     name: "merge conflicts",
@@ -432,6 +437,97 @@ export async function doctor(manifest?: string): Promise<Check[]> {
         : problems.join("; "),
   });
   return checks;
+}
+
+/**
+ * Whether Claude Code loads the plugin that carries the hooks sync wrote for it, as
+ * `fleetrc@skills-dir`. Undefined when there is no plugin folder.
+ */
+async function claudePluginCheck(): Promise<Check | undefined> {
+  const dir = join(claudeHome(), "skills", CLAUDE_PLUGIN_NAME);
+  if (!existsSync(join(dir, ".claude-plugin", "plugin.json"))) return undefined;
+  const name = "Claude Code hooks";
+  const plugin = `${CLAUDE_PLUGIN_NAME}@skills-dir`;
+  const run = await exec("claude", ["plugin", "list", "--json"], { timeoutMs: 15_000 });
+  if (run.spawnError === "ENOENT")
+    return {
+      name,
+      ok: true,
+      warn: true,
+      detail: `claude is not on PATH, so whether Claude Code loads ${tildify(dir)} as ${plugin} was not checked`,
+    };
+  if (run.code !== 0)
+    return {
+      name,
+      ok: true,
+      warn: true,
+      detail: `\`claude plugin list --json\` failed, so whether Claude Code loads ${plugin} was not checked: ${(run.stderr || run.stdout).trim().split("\n")[0] ?? ""}`,
+    };
+  return run.stdout.includes(plugin)
+    ? { name, ok: true, detail: `Claude Code loads ${plugin} from ${tildify(dir)}` }
+    : {
+        name,
+        ok: false,
+        detail: `\`claude plugin list\` does not show ${plugin}, so Claude Code runs none of the hooks in ${tildify(dir)}; check that no setting disables it, and restart Claude Code`,
+      };
+}
+
+/** The commands of each event in a hooks object, `{event: [{hooks: [{command}]}]}`. */
+function hookCommands(hooks: unknown): Map<string, Set<string>> {
+  const commands = new Map<string, Set<string>>();
+  if (!isRecord(hooks)) return commands;
+  for (const [event, groups] of Object.entries(hooks)) {
+    if (!Array.isArray(groups)) continue;
+    for (const group of groups) {
+      if (!isRecord(group) || !Array.isArray(group.hooks)) continue;
+      for (const handler of group.hooks)
+        if (isRecord(handler) && typeof handler.command === "string")
+          commands.set(event, (commands.get(event) ?? new Set()).add(handler.command));
+    }
+  }
+  return commands;
+}
+
+/**
+ * Grok also runs the hooks in ~/.claude/settings.json, so a command fleetrc gave Grok that sits
+ * under the same event there runs twice. Undefined when fleetrc wrote no Grok hooks.
+ */
+function grokTwiceCheck(state: State): Check | undefined {
+  const files = Object.entries(state.entries ?? {})
+    .filter(([id]) => id.startsWith("agentHooks/grok/"))
+    .map(([, record]) => record.file);
+  if (files.length === 0) return undefined;
+  const settings = join(claudeHome(), "settings.json");
+  let claude: Map<string, Set<string>>;
+  try {
+    const raw = readJsonOrNothing(settings);
+    claude = hookCommands(isRecord(raw) ? raw.hooks : undefined);
+  } catch {
+    claude = new Map();
+  }
+  const twice: string[] = [];
+  for (const file of files) {
+    let grok: Map<string, Set<string>>;
+    try {
+      const raw = readJsonOrNothing(file);
+      grok = hookCommands(isRecord(raw) ? raw.hooks : undefined);
+    } catch {
+      continue;
+    }
+    for (const [event, commands] of grok)
+      for (const command of commands)
+        if (claude.get(event)?.has(command))
+          twice.push(`${event} \`${command}\` (${tildify(file)})`);
+  }
+  return {
+    name: "Grok hooks",
+    ok: true,
+    warn: twice.length > 0,
+    detail:
+      twice.length === 0
+        ? "no hook fleetrc gave Grok is also in ~/.claude/settings.json"
+        : `Grok runs these twice, since it also reads ${tildify(settings)}: ${twice.join("; ")}; drop them from one of the two`,
+  };
 }
 
 /**

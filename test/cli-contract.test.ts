@@ -194,8 +194,11 @@ describe("errors", () => {
     });
     expect(rows.find((row) => row.id === "github-copilot")!.kinds).toEqual({
       instructions: m.at(".copilot/copilot-instructions.md"),
+      subagents: m.at(".copilot/agents"),
     });
-    expect(rows.find((row) => row.id === "cursor")!.kinds).toBeUndefined();
+    expect(rows.find((row) => row.id === "cursor")!.kinds).toEqual({
+      subagents: m.at(".cursor/agents"),
+    });
     // The agent's home moves with its override.
     const moved = await m.runWith(
       { env: { CLAUDE_CONFIG_DIR: m.at("elsewhere") } },
@@ -364,6 +367,7 @@ describe("list --json, the API programs built on fleetrc read", () => {
       lastChange: null,
       skills: [],
       files: [],
+      entries: [],
     });
     expect(existsSync(fresh.stateDir)).toBe(false);
     expect(existsSync(fresh.at(".cache"))).toBe(false);
@@ -386,7 +390,7 @@ describe("list --json, the API programs built on fleetrc read", () => {
       lastChange: string;
       skills: { name: string; source: string; dir: string; changedAt: string }[];
     };
-    expect(Object.keys(listed)).toEqual(["version", "lastChange", "skills", "files"]);
+    expect(Object.keys(listed)).toEqual(["version", "lastChange", "skills", "files", "entries"]);
     expect(listed.version).toBe(1);
     expect(Date.parse(listed.lastChange)).not.toBeNaN();
     expect(listed.skills.map((skill) => skill.name)).toEqual(["alpha", "zeta"]);
@@ -434,6 +438,7 @@ describe("list --json, the API programs built on fleetrc read", () => {
           { name: "legacy", source: "mine", dir, changedAt: addedAt },
         ],
         files: [],
+        entries: [],
       });
     }
     const text = await m.run("list");

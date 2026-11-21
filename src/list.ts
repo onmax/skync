@@ -1,4 +1,5 @@
-// `fleetrc list --json`: the skills and files linked on this machine, for programs built on fleetrc. It
+// `fleetrc list --json`: the skills and files linked on this machine, and the MCP servers and hooks
+// merged into agents' configs, for programs built on fleetrc. It
 // reads state.json alone, with no manifest and no network, so entry.ts runs it without the rest of
 // the CLI. The shape is a contract: a later version only adds fields, and bumps `version` for any
 // other change.
@@ -28,6 +29,18 @@ export interface ListedFile {
   target: string;
 }
 
+export interface ListedEntry {
+  /** `mcp/<agent>/<server>`, or `agentHooks/<agent>/...`. */
+  id: string;
+  /** The config file it is in. */
+  file: string;
+  /** Its key in that file. */
+  key: string;
+  /** The manifest source it comes from; a Claude Code plugin file lists them in `sources`. */
+  source?: string;
+  sources?: string[];
+}
+
 export interface SkillList {
   version: 1;
   /** When a sync last added, removed or changed a skill; null before the first. */
@@ -36,6 +49,8 @@ export interface SkillList {
   skills: ListedSkill[];
   /** Instruction files, subagents and commands, sorted by path. */
   files: ListedFile[];
+  /** MCP servers and hooks fleetrc wrote into agents' configs, sorted by id. */
+  entries: ListedEntry[];
 }
 
 /** The skills state.json records. A state.json that is missing or does not read lists none. */
@@ -66,6 +81,24 @@ export function skillList(): SkillList {
           typeof target === "string"
           ? [{ path, item, kind, source, agent, target }]
           : [];
+      }),
+    entries: Object.entries(isRecord(state.entries) ? state.entries : {})
+      .sort(([a], [b]) => (a < b ? -1 : 1))
+      .flatMap(([id, record]): ListedEntry[] => {
+        if (!isRecord(record)) return [];
+        const { file, key, source, sources } = record;
+        if (typeof file !== "string" || typeof key !== "string") return [];
+        return [
+          {
+            id,
+            file,
+            key,
+            ...(typeof source === "string" ? { source } : {}),
+            ...(Array.isArray(sources)
+              ? { sources: sources.filter((item) => typeof item === "string") }
+              : {}),
+          },
+        ];
       }),
   };
 }

@@ -33,7 +33,8 @@ import { expandPath, paths, tildify } from "./paths.ts";
 import { tailscaleManifest } from "./tailscale.ts";
 import { cronProblem, timeZoneProblem } from "./timer.ts";
 import { LEGACY_MANIFEST_DIR, legacyWarning } from "./legacy.ts";
-import { agentsWith, defaultAgents, FILE_KINDS, type FileKind } from "./kinds.ts";
+import { HOOK_DEF_AGENTS } from "./hookdefs.ts";
+import { agentsWith, defaultAgents, FILE_KINDS, ITEM_KINDS, type ItemKind } from "./kinds.ts";
 
 export type UpdateMode = "auto" | "review";
 
@@ -45,14 +46,17 @@ interface SourceCommon {
   skills?: string;
   include?: string[];
   exclude?: string[];
-  /** Files of each kind the source gives agents: a glob inside the source for each agent id. */
+  /**
+   * Files of each kind the source gives agents: a glob inside the source for each agent id. An
+   * `mcp` file goes to every agent, under the id `*`.
+   */
   files?: FileSpecs;
   update: UpdateMode;
   /** The manifest that declared the source. */
   origin: string;
 }
 
-export type FileSpecs = Partial<Record<FileKind, Record<string, string>>>;
+export type FileSpecs = Partial<Record<ItemKind, Record<string, string>>>;
 
 /** A git repository you work in: updated with fetch + fast-forward, linked in place. */
 export interface CloneSource extends SourceCommon {
@@ -160,7 +164,7 @@ const SOURCE_KEYS = new Set([
   "update",
   "adopt",
   "followLinks",
-  ...FILE_KINDS,
+  ...ITEM_KINDS,
 ]);
 const ROOT_KEYS = new Set([
   "$schema",
@@ -247,6 +251,32 @@ function fileSpecs(file: string, at: string, raw: Record<string, unknown>): File
     }
     out[kind] = specs;
   }
+  const mcp = raw.mcp;
+  if (mcp !== undefined) {
+    if (typeof mcp !== "string")
+      fail(file, `${at}.mcp`, 'must be the path of a file with an "mcpServers" object');
+    out.mcp = dict([["*", skillsGlob(file, `${at}.mcp`, mcp)!]]);
+  }
+  const hooks = raw.agentHooks;
+  if (hooks !== undefined) {
+    if (typeof hooks === "string")
+      out.agentHooks = dict([["claude-code", skillsGlob(file, `${at}.agentHooks`, hooks)!]]);
+    else {
+      if (!isRecord(hooks) || Object.keys(hooks).length === 0)
+        fail(file, `${at}.agentHooks`, "must be a path, or an object of paths by agent id");
+      const specs = dict<string>();
+      for (const [agent, path] of Object.entries(hooks)) {
+        if (!(HOOK_DEF_AGENTS as readonly string[]).includes(agent))
+          fail(
+            file,
+            `${at}.agentHooks.${agent}`,
+            `names an agent fleetrc syncs no hooks for; hooks go to ${HOOK_DEF_AGENTS.join(", ")}`,
+          );
+        specs[agent] = skillsGlob(file, `${at}.agentHooks.${agent}`, path)!;
+      }
+      out.agentHooks = specs;
+    }
+  }
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
@@ -327,7 +357,7 @@ function parseSource(file: string, at: string, raw: unknown, base: string): Sour
       for (const key of ["ref", "path", "registry", "adopt", "followLinks"])
         onlyFor(key, key === "registry" ? "npm" : "git");
       // An index lists skills by name; there are no folders to glob.
-      for (const key of ["skills", ...FILE_KINDS]) onlyFor(key, "git, npm and local");
+      for (const key of ["skills", ...ITEM_KINDS]) onlyFor(key, "git, npm and local");
       try {
         new URL(spec);
       } catch {
@@ -1260,8 +1290,15 @@ function readManifestFile(
   return parseManifest(file, raw, { extended });
 }
 
-/** Fields a source may set only in the root manifest, which an extended one's sources lose. */
-const ROOT_ONLY_SOURCE_KEYS = ["followLinks"] as const;
+/**
+ * Fields a source may set only in the root manifest, which an extended one's sources lose, with
+ * why: each lets whoever pushes to the source run code or read files on this machine.
+ */
+const ROOT_ONLY_SOURCE_KEYS = {
+  followLinks: "only the root manifest can follow links out of a source",
+  mcp: "only the root manifest can add MCP servers, since each one runs a command",
+  agentHooks: "only the root manifest can add hooks, since each one runs a command",
+} as const;
 
 /**
  * Loads the root manifest and everything it extends. Extended manifests add sources only:
@@ -1374,11 +1411,11 @@ export async function loadManifest(
               if (!Array.isArray(raw.sources)) return;
               for (const [i, source] of raw.sources.entries()) {
                 if (!isRecord(source)) continue;
-                for (const key of ROOT_ONLY_SOURCE_KEYS) {
+                for (const [key, why] of Object.entries(ROOT_ONLY_SOURCE_KEYS)) {
                   if (source[key] === undefined) continue;
                   delete source[key];
                   warnings.push(
-                    `extends ${parent}: ignored "${key}" of source "${typeof source.id === "string" ? source.id : `sources[${i}]`}"; only the root manifest can follow links out of a source`,
+                    `extends ${parent}: ignored "${key}" of source "${typeof source.id === "string" ? source.id : `sources[${i}]`}"; ${why}`,
                   );
                 }
               }

@@ -211,7 +211,15 @@
               "type": "object",
               "minProperties": 1,
               "propertyNames": {
-                "enum": ["claude-code", "codex", "grok", "gemini-cli", "opencode"]
+                "enum": [
+                  "claude-code",
+                  "codex",
+                  "grok",
+                  "gemini-cli",
+                  "opencode",
+                  "cursor",
+                  "github-copilot"
+                ]
               },
               "additionalProperties": { "type": "string", "minLength": 1 },
               "description": "A glob of files inside the source for each agent id. Each agent gets its own files: nothing is translated."
@@ -234,6 +242,28 @@
               "description": "A glob of files inside the source for each agent id. Each agent gets its own files: nothing is translated."
             }
           ]
+        },
+        "mcp": {
+          "type": "string",
+          "minLength": 1,
+          "description": "A file inside the source holding {\"mcpServers\": {...}}, merged into every agent's MCP config (Claude Code, Codex, Cursor, Gemini CLI, GitHub Copilot, Grok, OpenCode), each in its own format. Secrets are written as ${VAR}: a literal value in a header, or in an env key that looks like a token, key, secret, password or auth, fails that server. A server may list the agents it goes to in \"agents\". Only the root manifest can set it; an extended manifest's is ignored."
+        },
+        "agentHooks": {
+          "description": "Hook definitions, in each agent's own hooks format: Claude Code's go into a plugin fleetrc writes at ~/.claude/skills/fleetrc, Codex's into ~/.codex/hooks.json (approve them in /hooks), Grok's into ~/.grok/hooks, Gemini CLI's into ~/.gemini/settings.json and Cursor's into ~/.cursor/hooks.json, each next to the user's own. Only the root manifest can set it; an extended manifest's is ignored.",
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "description": "A file inside the source of Claude Code hooks, {\"hooks\": {...}}; it goes to Claude Code only."
+            },
+            {
+              "type": "object",
+              "minProperties": 1,
+              "propertyNames": { "enum": ["claude-code", "codex", "grok", "gemini-cli", "cursor"] },
+              "additionalProperties": { "type": "string", "minLength": 1 },
+              "description": "A file inside the source for each agent id, in that agent's hooks format. Nothing is translated."
+            }
+          ]
         }
       }
     },
@@ -253,6 +283,8 @@
             "instructions": { "$ref": "#/$defs/common/properties/instructions" },
             "subagents": { "$ref": "#/$defs/common/properties/subagents" },
             "commands": { "$ref": "#/$defs/common/properties/commands" },
+            "mcp": { "$ref": "#/$defs/common/properties/mcp" },
+            "agentHooks": { "$ref": "#/$defs/common/properties/agentHooks" },
             "git": {
               "type": "string",
               "minLength": 1,
@@ -300,6 +332,8 @@
             "instructions": { "$ref": "#/$defs/common/properties/instructions" },
             "subagents": { "$ref": "#/$defs/common/properties/subagents" },
             "commands": { "$ref": "#/$defs/common/properties/commands" },
+            "mcp": { "$ref": "#/$defs/common/properties/mcp" },
+            "agentHooks": { "$ref": "#/$defs/common/properties/agentHooks" },
             "npm": { "type": "string", "minLength": 1 },
             "registry": { "type": "string", "format": "uri" }
           }
@@ -317,6 +351,8 @@
             "instructions": { "$ref": "#/$defs/common/properties/instructions" },
             "subagents": { "$ref": "#/$defs/common/properties/subagents" },
             "commands": { "$ref": "#/$defs/common/properties/commands" },
+            "mcp": { "$ref": "#/$defs/common/properties/mcp" },
+            "agentHooks": { "$ref": "#/$defs/common/properties/agentHooks" },
             "local": { "type": "string", "minLength": 1 },
             "adopt": { "type": "boolean" }
           }

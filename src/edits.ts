@@ -42,7 +42,7 @@ import {
 import { findName } from "./names.ts";
 import { paths, tildify } from "./paths.ts";
 import { pendingGitBase, storePaths } from "./sources.ts";
-import type { FileKind } from "./kinds.ts";
+import type { ItemKind } from "./kinds.ts";
 import {
   loadState,
   saveState,
@@ -93,7 +93,7 @@ interface Located {
   /** The skill's entry under "forks", by the key the manifest gives it. */
   fork?: { key: string; fork: Fork };
   /** For a file (`<kind>/<path>`): its kind, and its folder's name in the store. */
-  item?: { kind: FileKind; key: string };
+  item?: { kind: ItemKind; key: string };
 }
 
 /**
@@ -441,7 +441,7 @@ export async function diffPending(spec: string): Promise<string> {
           parts.push(
             await diffVendored(state, source, {
               name: `${kind}/${itemPath(key)}`,
-              item: { kind: kind as FileKind, key },
+              item: { kind: kind as ItemKind, key },
             }),
           );
     } else if (source.kind === "clone" && source.update === "review" && existsSync(source.path)) {

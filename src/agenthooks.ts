@@ -6,24 +6,11 @@
 // codex-rs/hooks/src/engine/discovery.rs and codex-rs/config/src/hook_config.rs). On Windows,
 // Claude Code's entry is in exec form, `"command"` and `"args"`, which Claude Code starts with no
 // shell (code.claude.com/docs/en/hooks, "Exec form and shell form").
-import { randomBytes } from "node:crypto";
-import {
-  closeSync,
-  existsSync,
-  fchmodSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  readlinkSync,
-  realpathSync,
-  renameSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, readlinkSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
-import { isErrno, isRecord, JsonFileError, lstat, readJson } from "./fs.ts";
+import { join } from "node:path";
+import { readText, replaceIfUnchanged } from "./configfile.ts";
+import { isRecord, JsonFileError, lstat, readJson } from "./fs.ts";
 import { HOOK_AGENTS, type HookAgent } from "./hook.ts";
 import { editJsonText } from "./jsonedit.ts";
 import { eitherName, LEGACY_DISABLED } from "./legacy.ts";
@@ -294,16 +281,6 @@ export interface HookChange {
   error?: string;
 }
 
-/** The file's text, or undefined when it does not exist. */
-function readText(file: string): string | undefined {
-  try {
-    return readFileSync(file, "utf8");
-  } catch (error) {
-    if (isErrno(error, "ENOENT")) return undefined;
-    throw error;
-  }
-}
-
 /** A hooks file's text as a JSON object. */
 function parseObject(text: string, file: string): Json {
   let raw: unknown;
@@ -356,26 +333,11 @@ export function editHooksFile(
     const out =
       (snapshot === undefined ? undefined : editJsonText(snapshot, before, after)) ??
       `${JSON.stringify(after, null, 2)}\n`;
-    mkdirSync(dirname(target), { recursive: true });
-    // The temp file is created with the target's mode, so a 0600 settings.json is never readable
-    // by others, not even in its copy; the umask can only narrow the mode, which fchmod restores.
-    const mode = snapshot === undefined ? undefined : statSync(target).mode & 0o7777;
-    const temp = `${target}.fleetrc-${process.pid}-${randomBytes(6).toString("hex")}.tmp`;
-    const fd = openSync(temp, "wx", mode ?? 0o600);
-    try {
-      if (mode !== undefined) fchmodSync(fd, mode);
-      writeFileSync(fd, out);
-    } finally {
-      closeSync(fd);
-    }
-    options.step?.();
+    // The temp file gets the target's mode, so a 0600 settings.json is never readable by others.
+    const mode = snapshot === undefined ? 0o600 : statSync(target).mode & 0o7777;
     // Claude Code writes settings.json too, without a lock, so a write of its between this read
-    // and the rename below is lost: a narrow window this check can't close.
-    if (readText(target) !== snapshot) {
-      rmSync(temp, { force: true });
-      continue;
-    }
-    renameSync(temp, target);
+    // and the rename is lost: a narrow window this check can't close.
+    if (!replaceIfUnchanged(target, snapshot, out, mode, options.step)) continue;
     return { changed: true };
   }
   return {

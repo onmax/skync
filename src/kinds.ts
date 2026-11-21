@@ -1,7 +1,8 @@
-// Where each agent reads the files fleetrc links besides skills: its user-level instruction file,
-// its subagents and its commands. The MCP and hook cells are data for the config writers; sync
-// does not use them yet. Each cell is the agent's documented user-level location; a cell the
-// vendor's docs do not confirm is left out.
+// Where each agent reads the files fleetrc links besides skills (its user-level instruction file,
+// its subagents and its commands), and where it keeps the MCP servers and hooks fleetrc merges in
+// (entrysync.ts). Each cell is the agent's documented user-level location; a cell the vendor's
+// docs do not confirm is left out.
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { claudeHome, xdgDir } from "./paths.ts";
@@ -10,18 +11,48 @@ import { claudeHome, xdgDir } from "./paths.ts";
 export const FILE_KINDS = ["instructions", "subagents", "commands"] as const;
 export type FileKind = (typeof FILE_KINDS)[number];
 
+/**
+ * Kinds of definition files a source can provide, vendored like files but never linked: their
+ * entries are merged into each agent's own config (entrysync.ts). Only the root manifest's
+ * sources may set them, since an MCP server or a hook runs a command.
+ */
+export const DEFINITION_KINDS = ["mcp", "agentHooks"] as const;
+export type DefinitionKind = (typeof DEFINITION_KINDS)[number];
+
+/** Every kind of item a source keeps besides skills. */
+export const ITEM_KINDS = [...FILE_KINDS, ...DEFINITION_KINDS] as const;
+export type ItemKind = (typeof ITEM_KINDS)[number];
+
+export const isFileKind = (kind: string): kind is FileKind => FILE_KINDS.includes(kind as FileKind);
+
 /** Where an agent keeps its MCP servers: a file and the key that holds them. */
 export interface McpCell {
   file: () => string;
-  format: "json" | "toml";
+  /** `json` also covers a `.jsonc` file the cell picks, which is edited as JSONC. */
+  format: "json" | "jsonc" | "toml";
   /** The key path of the servers object, such as `["mcpServers"]`. */
   key: readonly string[];
 }
 
-/** How fleetrc gives an agent its hooks. */
+/**
+ * How fleetrc gives an agent its hooks:
+ * - `plugin`: a plugin folder fleetrc owns (Claude Code);
+ * - `file`: a hooks.json whose groups keep their slots, since the agent keys approval by position
+ *   (Codex);
+ * - `entries`: marked entries under `hooks` in a JSON file the agent shares with the user, each
+ *   added, changed or removed alone (Gemini CLI, Cursor);
+ * - `files`: one owned file per definition (Grok).
+ */
 export type AgentHooksCell =
   | { style: "plugin" }
   | { style: "file"; file: () => string }
+  | {
+      style: "entries";
+      file: () => string;
+      format: "json" | "jsonc";
+      /** Top-level keys a file fleetrc creates starts with. */
+      seed?: Record<string, unknown>;
+    }
   | { style: "files"; dir: () => string; prefix: string };
 
 export interface AgentKinds {
@@ -41,6 +72,7 @@ const env = (name: string) => process.env[name]?.trim() || undefined;
 const codexHome = () => env("CODEX_HOME") ?? join(homedir(), ".codex");
 const grokHome = () => env("GROK_HOME") ?? join(homedir(), ".grok");
 const configHome = () => xdgDir("XDG_CONFIG_HOME") ?? join(homedir(), ".config");
+const geminiSettings = () => join(homedir(), ".gemini", "settings.json");
 
 /** The agents fleetrc links files into, by `skills` agent id. */
 export const AGENT_KINDS: Readonly<Record<string, AgentKinds>> = {
@@ -86,12 +118,14 @@ export const AGENT_KINDS: Readonly<Record<string, AgentKinds>> = {
     // https://geminicli.com/docs/core/subagents/: "User-level: `~/.gemini/agents/*.md`".
     subagents: "agents",
     commands: "commands",
-    // https://geminicli.com/docs/tools/mcp-server/: the `mcpServers` object of settings.json.
-    mcp: {
-      file: () => join(homedir(), ".gemini", "settings.json"),
-      format: "json",
-      key: ["mcpServers"],
-    },
+    // https://geminicli.com/docs/tools/mcp-server/: the `mcpServers` object of settings.json,
+    // which Gemini CLI reads through strip-json-comments (packages/cli/src/config/settings.ts), so
+    // it is edited as JSONC.
+    mcp: { file: () => geminiSettings(), format: "jsonc", key: ["mcpServers"] },
+    // https://geminicli.com/docs/hooks/: matcher groups under `hooks.<Event>` of
+    // ~/.gemini/settings.json. Gemini CLI ignores a group's keys besides `matcher`, `sequential`
+    // and `hooks` (packages/core/src/hooks/hookRegistry.ts), so fleetrc marks its groups there.
+    agentHooks: { style: "entries", file: () => geminiSettings(), format: "jsonc" },
   },
   opencode: {
     home: () => join(configHome(), "opencode"),
@@ -102,16 +136,26 @@ export const AGENT_KINDS: Readonly<Record<string, AgentKinds>> = {
     // https://opencode.ai/docs/commands/: `~/.config/opencode/commands/`; nested paths become
     // `/team/review`.
     commands: "commands",
-    // https://opencode.ai/docs/config/ and https://opencode.ai/docs/mcp-servers/: servers go under
-    // `mcp.servers` of `~/.config/opencode/opencode.json(c)`.
+    // https://opencode.ai/docs/mcp-servers/ ("V2 does not place server names directly under
+    // `mcp`") and the config schema https://opencode.ai/config.json, which marks a server under
+    // `mcp.<name>` deprecated: servers go under `mcp.servers` of
+    // `~/.config/opencode/opencode.json`, or `opencode.jsonc` when that is the file there.
     mcp: {
-      file: () => join(configHome(), "opencode", "opencode.json"),
-      format: "json",
+      file: () => {
+        const dir = join(configHome(), "opencode");
+        return existsSync(join(dir, "opencode.jsonc"))
+          ? join(dir, "opencode.jsonc")
+          : join(dir, "opencode.json");
+      },
+      format: "jsonc",
       key: ["mcp", "servers"],
     },
   },
   cursor: {
     home: () => join(homedir(), ".cursor"),
+    // https://cursor.com/docs/context/subagents: "`~/.cursor/agents/`: available across all
+    // projects for the current user"; cursor-agent reads it recursively.
+    subagents: "agents",
     // Commands left out: Cursor's docs dropped the commands page when commands became skills,
     // and the 1.6 changelog names only a project's `.cursor/commands`.
     // https://cursor.com/docs/context/mcp: "Create `~/.cursor/mcp.json` in your home directory".
@@ -120,12 +164,25 @@ export const AGENT_KINDS: Readonly<Record<string, AgentKinds>> = {
       format: "json",
       key: ["mcpServers"],
     },
+    // https://cursor.com/docs/agent/hooks: user hooks in `~/.cursor/hooks.json`, `{"version": 1,
+    // "hooks": {"<event>": [script, …]}}`. cursor-agent's validator (validators/hooksConfig.js)
+    // checks a script's known fields only, so fleetrc marks its scripts with a key of its own.
+    agentHooks: {
+      style: "entries",
+      file: () => join(homedir(), ".cursor", "hooks.json"),
+      format: "json",
+      seed: { version: 1 },
+    },
   },
   "github-copilot": {
     // https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-custom-instructions:
     // `$HOME/.copilot/copilot-instructions.md`, or `COPILOT_HOME` in place of `$HOME/.copilot`.
     home: () => env("COPILOT_HOME") ?? join(homedir(), ".copilot"),
     instructions: "copilot-instructions.md",
+    // https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/create-custom-agents-for-cli:
+    // user custom agents in `~/.copilot/agents/`, `<name>.agent.md` or `<name>.md`; a subfolder
+    // joins the id with `--`.
+    subagents: "agents",
     // https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-mcp-servers:
     // `mcpServers` of ~/.copilot/mcp-config.json.
     mcp: {

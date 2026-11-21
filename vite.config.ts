@@ -63,6 +63,7 @@ export default defineConfig({
         "@vite-hub/runtime",
         "cron-schedule",
         "jsonc-parser",
+        "smol-toml",
         "fastest-levenshtein",
       ],
     },

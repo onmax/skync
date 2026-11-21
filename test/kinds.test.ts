@@ -40,6 +40,8 @@ describe("kindPath", () => {
     expect(kindPath("github-copilot", "instructions")).toBe(
       join(home, ".copilot", "copilot-instructions.md"),
     );
+    expect(kindPath("cursor", "subagents")).toBe(join(home, ".cursor", "agents"));
+    expect(kindPath("github-copilot", "subagents")).toBe(join(home, ".copilot", "agents"));
   });
 
   it("follows each agent's home override", () => {
@@ -59,10 +61,10 @@ describe("kindPath", () => {
 
   it("has no path for a kind an agent does not read, or for an unknown agent", () => {
     expect(kindPath("cursor", "commands")).toBeUndefined();
-    expect(kindPath("github-copilot", "subagents")).toBeUndefined();
     expect(kindPath("codex", "commands")).toBeUndefined();
     expect(kindPath("toString", "instructions")).toBeUndefined();
-    expect(agentKindPaths("cursor")).toEqual({});
+    clear();
+    expect(agentKindPaths("cursor")).toEqual({ subagents: join(homedir(), ".cursor", "agents") });
   });
 });
 
@@ -82,6 +84,8 @@ describe("which agents get a kind", () => {
       "grok",
       "gemini-cli",
       "opencode",
+      "cursor",
+      "github-copilot",
     ]);
     expect(agentsWith("commands")).toEqual(["claude-code", "gemini-cli", "opencode"]);
     expect(defaultAgents("instructions")).toEqual(agentsWith("instructions"));

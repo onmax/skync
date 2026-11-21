@@ -43,6 +43,26 @@ export interface Report {
     /** Paths fleetrc would link that hold a file it did not make, left as they are. */
     foreign: string[];
   };
+  /**
+   * MCP servers and hooks merged into agents' configs, by entry id (`mcp/<agent>/<server>`,
+   * `agentHooks/<agent>/...`). Missing from a last run saved before fleetrc merged any.
+   */
+  entries?: {
+    total: number;
+    added: string[];
+    updated: string[];
+    removed: string[];
+    /** Entries that already held the manifest's value, which fleetrc now owns. */
+    adopted: string[];
+    /** Entries edited since fleetrc wrote them, left as they are. */
+    held: { id: string; file: string }[];
+    /** Keys fleetrc would write that hold a value it did not write, left as they are. */
+    foreign: { id: string; file: string }[];
+    /** Codex hooks written new or changed, which run only once approved in Codex's /hooks. */
+    review: string[];
+    /** Config files not edited this sync (locked, or changed meanwhile). */
+    skipped: string[];
+  };
   /** Skills and files of a later source that an earlier one has; the first source wins. */
   shadowed: { skill: string; winner: string; loser: string }[];
   /** Skills whose name changed upstream only in case or Unicode form: the same skill, renamed. */
@@ -73,8 +93,9 @@ export function formatReport(report: Report): string {
   const verb = report.dryRun ? "would link" : "linked";
   const folders = report.targets.filter((target) => !target.skipped && !target.former).length;
   const files = report.files.total;
+  const merged = report.entries?.total ?? 0;
   lines.push(
-    `fleetrc: ${verb} ${report.skills.total} skills into ${folders} folder${folders === 1 ? "" : "s"}${files ? ` and ${files} file${files === 1 ? "" : "s"}` : ""}${report.offline ? " (offline)" : ""}`,
+    `fleetrc: ${verb} ${report.skills.total} skills into ${folders} folder${folders === 1 ? "" : "s"}${files ? ` and ${files} file${files === 1 ? "" : "s"}` : ""}${merged ? `, with ${merged} MCP server and hook entr${merged === 1 ? "y" : "ies"}` : ""}${report.offline ? " (offline)" : ""}`,
   );
   if (report.skills.added.length) lines.push(`  + added: ${list(report.skills.added)}`);
   if (report.skills.updated.length) lines.push(`  ~ updated: ${list(report.skills.updated)}`);
@@ -88,6 +109,28 @@ export function formatReport(report: Report): string {
   for (const path of report.files.removed) lines.push(`  - ${tildify(path)}`);
   for (const path of report.files.adopted)
     lines.push(`  adopted ${tildify(path)}: it already links where fleetrc links`);
+  const entries = report.entries;
+  if (entries) {
+    for (const id of entries.added) lines.push(`  + ${id}`);
+    if (entries.updated.length) lines.push(`  ~ updated: ${list(entries.updated)}`);
+    for (const id of entries.removed) lines.push(`  - ${id}`);
+    for (const id of entries.adopted)
+      lines.push(`  adopted ${id}: it already holds what the manifest gives it`);
+    for (const { id, file } of entries.held)
+      lines.push(
+        `  held ${id}: edited in ${tildify(file)} since fleetrc wrote it, so it was left as it is${id.startsWith("mcp/") ? `; see \`fleetrc diff ${id}\`` : ""}; delete it there to take the manifest's`,
+      );
+    for (const { id, file } of entries.foreign)
+      lines.push(
+        `  foreign ${id}: ${tildify(file)} already has one fleetrc did not write; left as it is`,
+      );
+    if (entries.review.length)
+      lines.push(
+        `  review: Codex runs ${entries.review.length === 1 ? "this hook" : "these hooks"} only once approved; approve in /hooks: ${list(entries.review)}`,
+      );
+    for (const file of entries.skipped)
+      lines.push(`  skipped ${tildify(file)}: tried again next sync`);
+  }
   for (const renamed of report.renamed) lines.push(`  renamed ${renamed.from} -> ${renamed.to}`);
   for (const source of report.sources) {
     if (source.status === "updated" && source.from && source.to && source.from !== source.to)
