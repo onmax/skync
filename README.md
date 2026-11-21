@@ -218,9 +218,10 @@ A `git`, `npm` or `local` source can also give your agents their user-level inst
 | Grok           | `~/.grok/AGENTS.md`                  | `~/.grok/agents/`            |                                |
 | Gemini CLI     | `~/.gemini/GEMINI.md`                | `~/.gemini/agents/`          | `~/.gemini/commands/`          |
 | OpenCode       | `~/.config/opencode/AGENTS.md`       | `~/.config/opencode/agents/` | `~/.config/opencode/commands/` |
-| GitHub Copilot | `~/.copilot/copilot-instructions.md` |                              |                                |
+| Cursor         |                                      | `~/.cursor/agents/`          |                                |
+| GitHub Copilot | `~/.copilot/copilot-instructions.md` | `~/.copilot/agents/`         |                                |
 
-`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `GROK_HOME`, `COPILOT_HOME` and `XDG_CONFIG_HOME` move these folders. Cursor reads none of them at the user level: its docs name only a project's `.cursor/commands`.
+`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `GROK_HOME`, `COPILOT_HOME` and `XDG_CONFIG_HOME` move these folders. Cursor reads no instruction file or commands at the user level: its docs name only a project's `.cursor/commands`. Copilot names a custom agent `<name>.agent.md`.
 
 ### MCP servers
 

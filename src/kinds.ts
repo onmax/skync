@@ -153,6 +153,9 @@ export const AGENT_KINDS: Readonly<Record<string, AgentKinds>> = {
   },
   cursor: {
     home: () => join(homedir(), ".cursor"),
+    // https://cursor.com/docs/context/subagents: "`~/.cursor/agents/`: available across all
+    // projects for the current user"; cursor-agent reads it recursively.
+    subagents: "agents",
     // Commands left out: Cursor's docs dropped the commands page when commands became skills,
     // and the 1.6 changelog names only a project's `.cursor/commands`.
     // https://cursor.com/docs/context/mcp: "Create `~/.cursor/mcp.json` in your home directory".
@@ -176,6 +179,10 @@ export const AGENT_KINDS: Readonly<Record<string, AgentKinds>> = {
     // `$HOME/.copilot/copilot-instructions.md`, or `COPILOT_HOME` in place of `$HOME/.copilot`.
     home: () => env("COPILOT_HOME") ?? join(homedir(), ".copilot"),
     instructions: "copilot-instructions.md",
+    // https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/create-custom-agents-for-cli:
+    // user custom agents in `~/.copilot/agents/`, `<name>.agent.md` or `<name>.md`; a subfolder
+    // joins the id with `--`.
+    subagents: "agents",
     // https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-mcp-servers:
     // `mcpServers` of ~/.copilot/mcp-config.json.
     mcp: {

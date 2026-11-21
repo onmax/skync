@@ -40,10 +40,12 @@ interface Report extends SkillReport {
 
 interface Kind {
   key: "instructions" | "subagents" | "commands";
+  /** The agent that reads it. */
+  agent: string;
   /** The file in the source repository. */
   file: string;
   glob: string;
-  /** Where Claude Code reads it, inside HOME. */
+  /** Where the agent reads it, inside HOME. */
   at: string;
   item: string;
 }
@@ -51,6 +53,7 @@ interface Kind {
 const KINDS: Kind[] = [
   {
     key: "instructions",
+    agent: "claude-code",
     file: "AGENTS.md",
     glob: "AGENTS.md",
     at: ".claude/CLAUDE.md",
@@ -58,13 +61,31 @@ const KINDS: Kind[] = [
   },
   {
     key: "subagents",
+    agent: "claude-code",
     file: "agents/reviewer.md",
     glob: "agents/*.md",
     at: ".claude/agents/reviewer.md",
     item: "subagents/agents/reviewer.md",
   },
   {
+    key: "subagents",
+    agent: "cursor",
+    file: "agents/reviewer.md",
+    glob: "agents/*.md",
+    at: ".cursor/agents/reviewer.md",
+    item: "subagents/agents/reviewer.md",
+  },
+  {
+    key: "subagents",
+    agent: "github-copilot",
+    file: "agents/reviewer.agent.md",
+    glob: "agents/*.agent.md",
+    at: ".copilot/agents/reviewer.agent.md",
+    item: "subagents/agents/reviewer.agent.md",
+  },
+  {
     key: "commands",
+    agent: "claude-code",
     file: "commands/git/commit.md",
     glob: "commands/**/*.md",
     at: ".claude/commands/git/commit.md",
@@ -72,22 +93,31 @@ const KINDS: Kind[] = [
   },
 ];
 
+/** The Claude Code cell of `key`. */
+const kindFor = (key: Kind["key"]) =>
+  KINDS.find((kind) => kind.key === key && kind.agent === "claude-code")!;
+
 const lines = (...body: string[]) => `${body.join("\n")}\n`;
 
-/** A vendored git source with a skill and one file of `kind`, linked into Claude Code. */
+/** The manifest key that sends `kind` to its agent alone. */
+const spec = (kind: Kind) => ({
+  [kind.key]: kind.agent === "claude-code" ? kind.glob : { [kind.agent]: kind.glob },
+});
+
+/** A vendored git source with a skill and one file of `kind`, linked into its agent's folder. */
 async function vendored(kind: Kind, extra: object = {}) {
   const m = machine();
   const vendor = remote(m, "vendor", {
     ...skills("skills/", "tool"),
     [kind.file]: lines("one", "two", "three"),
   });
-  const write = (spec: object) =>
+  const write = (fields: object) =>
     m.manifest({
-      agents: ["claude-code"],
-      sources: [{ id: "vendor", git: vendor.url, ...spec }],
+      agents: [kind.agent],
+      sources: [{ id: "vendor", git: vendor.url, ...fields }],
       ...extra,
     });
-  const manifest = write({ [kind.key]: kind.glob });
+  const manifest = write(spec(kind));
   const init = await m.json<{ sync: Report }>("init", manifest, "--no-hooks");
   expect(init.sync.ok, JSON.stringify(init.sync.errors)).toBe(true);
   return { m, vendor, manifest, write, init: init.sync };
@@ -115,8 +145,8 @@ function snapshot(root: string): Record<string, string> {
 
 const store = (m: Machine, ...parts: string[]) => join(m.stateDir, "store", ...parts);
 
-describe.each(KINDS)("$key", (kind) => {
-  it("is added: linked into Claude Code's folder from fleetrc's copy", async () => {
+describe.each(KINDS)("$key for $agent", (kind) => {
+  it("is added: linked into the agent's folder from fleetrc's copy", async () => {
     const { m, init } = await vendored(kind);
     const path = m.at(kind.at);
     expect(isLink(path)).toBe(true);
@@ -124,7 +154,7 @@ describe.each(KINDS)("$key", (kind) => {
     expect(read(path)).toBe(lines("one", "two", "three"));
     expect(init.files.added).toEqual([path]);
     expect(init.files.links).toEqual([
-      { path, item: kind.item, source: "vendor", agent: "claude-code" },
+      { path, item: kind.item, source: "vendor", agent: kind.agent },
     ]);
     const again = await m.json<Report>("sync");
     expect(again.files.total).toBe(1);
@@ -173,13 +203,13 @@ describe.each(KINDS)("$key", (kind) => {
     const m = machine();
     const vendor = remote(m, "vendor", { ...skills("skills/", "tool"), [kind.file]: lines("one") });
     const manifest = m.manifest({
-      agents: ["claude-code"],
+      agents: [kind.agent],
       sources: [{ id: "vendor", git: vendor.url }],
     });
     expect((await m.run("init", manifest, "--no-hooks")).code).toBe(0);
     m.manifest({
-      agents: ["claude-code"],
-      sources: [{ id: "vendor", git: vendor.url, [kind.key]: kind.glob }],
+      agents: [kind.agent],
+      sources: [{ id: "vendor", git: vendor.url, ...spec(kind) }],
     });
     const before = snapshot(m.root);
     const report = await m.json<Report>("sync", "--dry-run");
@@ -197,8 +227,8 @@ describe.each(KINDS)("$key", (kind) => {
     mkdirSync(join(m.at(kind.at), ".."), { recursive: true });
     writeFileSync(m.at(kind.at), "hand-made\n");
     const manifest = m.manifest({
-      agents: ["claude-code"],
-      sources: [{ id: "vendor", git: vendor.url, [kind.key]: kind.glob }],
+      agents: [kind.agent],
+      sources: [{ id: "vendor", git: vendor.url, ...spec(kind) }],
     });
     const init = await m.json<{ sync: Report }>("init", manifest, "--no-hooks");
     expect(init.sync.files.foreign).toEqual([m.at(kind.at)]);
@@ -206,7 +236,7 @@ describe.each(KINDS)("$key", (kind) => {
     expect(read(m.at(kind.at))).toBe("hand-made\n");
     expect(isLink(m.at(kind.at))).toBe(false);
     // Dropping it from the manifest still leaves the hand-made file.
-    m.manifest({ agents: ["claude-code"], sources: [{ id: "vendor", git: vendor.url }] });
+    m.manifest({ agents: [kind.agent], sources: [{ id: "vendor", git: vendor.url }] });
     await m.run("sync");
     expect(read(m.at(kind.at))).toBe("hand-made\n");
   });
@@ -391,7 +421,7 @@ describe("files across sources", () => {
   it("holds the first file of a new kind after the source's first fetch", async () => {
     const m = machine();
     const vendor = remote(m, "vendor", { "AGENTS.md": "approved instruction\n" });
-    const command = KINDS[2]!;
+    const command = kindFor("commands");
     const manifest = m.manifest({
       agents: ["claude-code"],
       sources: [
@@ -456,7 +486,7 @@ describe("files across sources", () => {
   });
 
   it("formats a version-1 status report from before file support", async () => {
-    const { m, init } = await vendored(KINDS[0]!);
+    const { m, init } = await vendored(kindFor("instructions"));
     const { files: _files, ...legacy } = init;
     writeFileSync(join(m.stateDir, "last-run.json"), JSON.stringify(legacy));
     const status = await m.run("status");
@@ -465,8 +495,8 @@ describe("files across sources", () => {
   });
 
   it("plans a new vendored copy without creating it", async () => {
-    const { m, vendor, write } = await vendored(KINDS[0]!);
-    const command = KINDS[2]!;
+    const { m, vendor, write } = await vendored(kindFor("instructions"));
+    const command = kindFor("commands");
     write({ instructions: "AGENTS.md", commands: command.glob });
     vendor.commit({ [command.file]: "new command\n" });
     const plan = await m.json<Report>("sync", "--dry-run", "--copy");

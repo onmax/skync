@@ -211,7 +211,15 @@
               "type": "object",
               "minProperties": 1,
               "propertyNames": {
-                "enum": ["claude-code", "codex", "grok", "gemini-cli", "opencode"]
+                "enum": [
+                  "claude-code",
+                  "codex",
+                  "grok",
+                  "gemini-cli",
+                  "opencode",
+                  "cursor",
+                  "github-copilot"
+                ]
               },
               "additionalProperties": { "type": "string", "minLength": 1 },
               "description": "A glob of files inside the source for each agent id. Each agent gets its own files: nothing is translated."

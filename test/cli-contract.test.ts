@@ -194,8 +194,11 @@ describe("errors", () => {
     });
     expect(rows.find((row) => row.id === "github-copilot")!.kinds).toEqual({
       instructions: m.at(".copilot/copilot-instructions.md"),
+      subagents: m.at(".copilot/agents"),
     });
-    expect(rows.find((row) => row.id === "cursor")!.kinds).toBeUndefined();
+    expect(rows.find((row) => row.id === "cursor")!.kinds).toEqual({
+      subagents: m.at(".cursor/agents"),
+    });
     // The agent's home moves with its override.
     const moved = await m.runWith(
       { env: { CLAUDE_CONFIG_DIR: m.at("elsewhere") } },
