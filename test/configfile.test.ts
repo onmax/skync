@@ -171,6 +171,35 @@ describe("editConfigText", () => {
     );
   });
 
+  it("adds, replaces and removes one list item, leaving its neighbours and comments as they are", () => {
+    const at = (item: number, value?: unknown): KeyEdit => ({
+      path: ["hooks", "BeforeTool"],
+      item,
+      value,
+    });
+    const text = `{\n  "hooks": {\n    "BeforeTool": [\n      { "matcher": "a" } // mine\n    ]\n  }\n}\n`;
+    const added = editConfigText(text, [at(1, { b: 1 })], "jsonc");
+    expect(added).toBe(
+      `{\n  "hooks": {\n    "BeforeTool": [\n      { "matcher": "a" }, // mine\n      {\n        "b": 1\n      }\n    ]\n  }\n}\n`,
+    );
+    expect(editConfigText(added, [at(1, { b: 2 })], "jsonc")).toBe(
+      added.replace('"b": 1', '"b": 2'),
+    );
+    expect(editConfigText(added, [at(1)], "jsonc")).toBe(text);
+    // A missing list is made with the item; an item past the end is refused.
+    expect(editConfigText(`{}`, [at(0, 1)], "json")).toBe(
+      `{\n  "hooks": {\n    "BeforeTool": [\n      1\n    ]\n  }\n}`,
+    );
+    expect(() => editConfigText(text, [at(3, 1)], "jsonc")).toThrow(/has no item 3/);
+    expect(() => editConfigText(`{"hooks": {"BeforeTool": {}}}`, [at(0, 1)], "json")).toThrow(
+      /is not a list/,
+    );
+    // One line: the item goes on it.
+    expect(editConfigText(`{"hooks": {"BeforeTool": [1]}}`, [at(1, 2)], "json")).toBe(
+      `{"hooks": {"BeforeTool": [1, 2]}}`,
+    );
+  });
+
   it("refuses comments in JSON, a repeated key, a non-object on the path, and a non-object root", () => {
     expect(() => editConfigText(`{ // c\n}`, [set("a", 1)], "json")).toThrow(ConfigEditError);
     expect(() =>

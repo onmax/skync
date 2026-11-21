@@ -38,10 +38,15 @@ export type ConfigFormat = "json" | "jsonc";
 /** Object keys from the root to an entry, such as `["mcpServers", "github"]`. */
 export type KeyPath = readonly string[];
 
-/** Sets the value at `path`, creating missing objects on the way; an undefined value removes it. */
+/**
+ * Sets the value at `path`, creating missing objects on the way; an undefined value removes it.
+ * With `item`, `path` names a list and the edit is to its item at that index: replaced, removed, or
+ * added when the index is the list's length (a missing list is created with it).
+ */
 export interface KeyEdit {
   path: KeyPath;
   value?: unknown;
+  item?: number;
 }
 
 /** A file that does not parse, or an edit that can't be placed in its text. */
@@ -118,12 +123,25 @@ function withValue(root: Record<string, unknown>, path: KeyPath, value: unknown)
   return copy;
 }
 
+/** `root` with the list at `path` edited at `index`, as `KeyEdit.item` describes. */
+function withItem(root: Record<string, unknown>, path: KeyPath, index: number, value: unknown) {
+  const list = valueAt(root, path);
+  const items = Array.isArray(list) ? [...list] : [];
+  if (value === undefined) items.splice(index, 1);
+  else items[index] = value;
+  return withValue(root, path, items);
+}
+
 /** `value` wrapped in an object per key of `path`. */
 const nest = (path: KeyPath, value: unknown): unknown =>
   path.reduceRight<unknown>((inner, key) => dict([[key, inner]]), value);
 
 /** Applies one edit to `text` (no byte order mark), placed as the text around it is laid out. */
-function editOnce(text: string, { path, value }: KeyEdit, format: ConfigFormat): string {
+function editOnce(
+  text: string,
+  { path, value, item: index }: KeyEdit,
+  format: ConfigFormat,
+): string {
   if (path.length === 0) throw new ConfigEditError("an edit needs a key");
   const eol = text.includes("\r\n") ? "\r\n" : "\n";
   const unit = text.match(/\n([ \t]+)\S/)?.[1] ?? "  ";
@@ -161,13 +179,15 @@ function editOnce(text: string, { path, value }: KeyEdit, format: ConfigFormat):
     return text[at] === "," ? at : undefined;
   };
 
-  const insert = (object: Node, key: string, item: unknown): Edit[] => {
+  /** Adds `item` after the last entry of `object`, as member `key`, or of a list when no key. */
+  const insert = (object: Node, key: string | undefined, item: unknown): Edit[] => {
+    const named = (text: string) => (key === undefined ? text : `${JSON.stringify(key)}: ${text}`);
     const members = object.children ?? [];
     const last = members.at(-1);
     const close = endOf(object) - 1;
     if (!last) {
       const indent = indentAt(object.offset);
-      const entry = `${JSON.stringify(key)}: ${block(item, indent + unit)}`;
+      const entry = named(block(item, indent + unit));
       const inner = text.slice(object.offset + 1, close);
       if (/^\s*$/.test(inner))
         return [
@@ -187,7 +207,7 @@ function editOnce(text: string, { path, value }: KeyEdit, format: ConfigFormat):
     const comma = commaAfter(last);
     const end = comma === undefined ? endOf(last) : comma + 1;
     if (!startsLine(last.offset)) {
-      const entry = `${JSON.stringify(key)}: ${inline(item)}`;
+      const entry = named(inline(item));
       return [
         { offset: end, length: 0, content: comma === undefined ? `, ${entry}` : ` ${entry},` },
       ];
@@ -195,7 +215,7 @@ function editOnce(text: string, { path, value }: KeyEdit, format: ConfigFormat):
     // On a line of its own, after a comment that trails the last member.
     const indent = indentAt(last.offset);
     const at = skip(end, false);
-    const entry = `${eol}${indent}${JSON.stringify(key)}: ${block(item, indent)}${comma === undefined ? "" : ","}`;
+    const entry = `${eol}${indent}${named(block(item, indent))}${comma === undefined ? "" : ","}`;
     if (comma !== undefined) return [{ offset: at, length: 0, content: entry }];
     if (at === end) return [{ offset: end, length: 0, content: `,${entry}` }];
     return [
@@ -204,6 +224,7 @@ function editOnce(text: string, { path, value }: KeyEdit, format: ConfigFormat):
     ];
   };
 
+  /** Removes `member` from `object`, or an item from a list. */
   const remove = (object: Node, member: Node): Edit[] => {
     const members = object.children!;
     const index = members.indexOf(member);
@@ -252,9 +273,24 @@ function editOnce(text: string, { path, value }: KeyEdit, format: ConfigFormat):
     const member = matches[0];
     if (!member) {
       if (value === undefined) return text;
-      return applyEdits(text, insert(object, key, nest(path.slice(i + 1), value)));
+      if (index !== undefined && index !== 0)
+        throw new ConfigEditError(`${where} has no item ${index}`);
+      const inner = index === undefined ? value : [value];
+      return applyEdits(text, insert(object, key, nest(path.slice(i + 1), inner)));
     }
     const node = member.children![1]!;
+    if (i === path.length - 1 && index !== undefined) {
+      if (node.type !== "array") throw new ConfigEditError(`${where} is not a list`);
+      const items = node.children ?? [];
+      const at = items[index];
+      if (value === undefined) return at ? applyEdits(text, remove(node, at)) : text;
+      if (at)
+        return applyEdits(text, [
+          { offset: at.offset, length: at.length, content: block(value, indentAt(at.offset)) },
+        ]);
+      if (index !== items.length) throw new ConfigEditError(`${where} has no item ${index}`);
+      return applyEdits(text, insert(node, undefined, value));
+    }
     if (i === path.length - 1) {
       if (value === undefined) return applyEdits(text, remove(object, member));
       return applyEdits(text, [
@@ -284,7 +320,10 @@ export function editConfigText(
   let expected = parseConfigText(out, format);
   for (const edit of edits) {
     out = editOnce(out, edit, format);
-    expected = withValue(expected, edit.path, edit.value);
+    expected =
+      edit.item === undefined
+        ? withValue(expected, edit.path, edit.value)
+        : withItem(expected, edit.path, edit.item, edit.value);
   }
   if (!sameValue(parseConfigText(out, format), expected))
     throw new ConfigEditError("the edit could not be placed in its text");
